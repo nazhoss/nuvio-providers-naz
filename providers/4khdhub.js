@@ -1,7 +1,6 @@
 /**
  * 4khdhub - Built from src/4khdhub/
- * Generated: 2025-12-31T21:33:16.718Z
- * Updated with resilient link extraction fixes
+ * Updated with resilient link extraction & Hotlink Bypass (Proxy Headers)
  */
 "use strict";
 var __defProp = Object.defineProperty;
@@ -132,14 +131,11 @@ function rot13Cipher(str) {
   });
 }
 function levenshteinDistance(s, t) {
-  if (s === t)
-    return 0;
+  if (s === t) return 0;
   const n = s.length;
   const m = t.length;
-  if (n === 0)
-    return m;
-  if (m === 0)
-    return n;
+  if (n === 0) return m;
+  if (m === 0) return n;
   const d = [];
   for (let i = 0; i <= n; i++) {
     d[i] = [];
@@ -157,34 +153,25 @@ function levenshteinDistance(s, t) {
   return d[n][m];
 }
 function parseBytes(val) {
-  if (typeof val === "number")
-    return val;
-  if (!val)
-    return 0;
+  if (typeof val === "number") return val;
+  if (!val) return 0;
   const match = val.match(/^([0-9.]+)\s*([a-zA-Z]+)$/);
-  if (!match)
-    return 0;
+  if (!match) return 0;
   const num = parseFloat(match[1]);
   const unit = match[2].toLowerCase();
   let multiplier = 1;
-  if (unit.indexOf("k") === 0)
-    multiplier = 1024;
-  else if (unit.indexOf("m") === 0)
-    multiplier = 1024 * 1024;
-  else if (unit.indexOf("g") === 0)
-    multiplier = 1024 * 1024 * 1024;
-  else if (unit.indexOf("t") === 0)
-    multiplier = 1024 * 1024 * 1024 * 1024;
+  if (unit.indexOf("k") === 0) multiplier = 1024;
+  else if (unit.indexOf("m") === 0) multiplier = 1024 * 1024;
+  else if (unit.indexOf("g") === 0) multiplier = 1024 * 1024 * 1024;
+  else if (unit.indexOf("t") === 0) multiplier = 1024 * 1024 * 1024 * 1024;
   return num * multiplier;
 }
 function formatBytes(val) {
-  if (val === 0)
-    return "0 B";
+  if (val === 0) return "0 B";
   const k = 1024;
   const sizes = ["B", "KB", "MB", "GB", "TB"];
   let i = Math.floor(Math.log(val) / Math.log(k));
-  if (i < 0)
-    i = 0;
+  if (i < 0) i = 0;
   return parseFloat((val / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
 }
 
@@ -227,6 +214,7 @@ function fetchPageUrl(name, year, isSeries) {
       }
       return href;
     }).get();
+    
     if (matchingCards.length === 0) {
       console.log("[4KHDHub] No matching cards found after filtering");
     } else {
@@ -241,13 +229,10 @@ var cheerio2 = require("cheerio-without-node-native");
 function resolveRedirectUrl(redirectUrl) {
   return __async(this, null, function* () {
     const redirectHtml = yield fetchText(redirectUrl);
-    if (!redirectHtml)
-      return null;
+    if (!redirectHtml) return null;
     try {
-      // Made regex more tolerant of spaces 
       const redirectDataMatch = redirectHtml.match(/'o',\s*'(.*?)'/);
-      if (!redirectDataMatch)
-        return null;
+      if (!redirectDataMatch) return null;
       const step1 = atob(redirectDataMatch[1]);
       const step2 = atob(step1);
       const step3 = rot13Cipher(step2);
@@ -266,7 +251,7 @@ function resolveRedirectUrl(redirectUrl) {
 function extractSourceResults($, el) {
   return __async(this, null, function* () {
     const localHtml = $(el).html();
-    const sizeMatch = localHtml.match(/([\d.]+ ?[GM]B)/i); // Case insensitive
+    const sizeMatch = localHtml.match(/([\d.]+ ?[GM]B)/i);
     const heightMatch = localHtml.match(/\d{3,}p/i);
     const title = $(el).find(".file-title, .episode-file-title").text().trim();
     let height = heightMatch ? parseInt(heightMatch[0]) : 0;
@@ -280,7 +265,6 @@ function extractSourceResults($, el) {
       title
     };
 
-    // Case-insensitive fallback lookup for HubCloud buttons
     const hubCloudLink = $(el).find("a").filter((_, a) => {
         const text = $(a).text().toLowerCase();
         const href = $(a).attr("href") || "";
@@ -289,10 +273,9 @@ function extractSourceResults($, el) {
 
     if (hubCloudLink) {
       const resolved = yield resolveRedirectUrl(hubCloudLink);
-      return { url: resolved || hubCloudLink, meta }; // Fallback to raw link if resolver fails
+      return { url: resolved || hubCloudLink, meta };
     }
 
-    // Case-insensitive fallback lookup for HubDrive buttons
     const hubDriveLink = $(el).find("a").filter((_, a) => {
         const text = $(a).text().toLowerCase();
         const href = $(a).attr("href") || "";
@@ -323,20 +306,16 @@ function extractSourceResults($, el) {
 
 function extractHubCloud(hubCloudUrl, baseMeta) {
   return __async(this, null, function* () {
-    if (!hubCloudUrl)
-      return [];
+    if (!hubCloudUrl) return [];
     const redirectHtml = yield fetchText(hubCloudUrl, { headers: { Referer: hubCloudUrl } });
-    if (!redirectHtml)
-      return [];
+    if (!redirectHtml) return [];
     
-    // Broadened regex to accept varying spaces and quote types
     let finalLinksUrl = null;
     const redirectUrlMatch = redirectHtml.match(/url\s*=\s*['"]([^'"]+)['"]/i);
     
     if (redirectUrlMatch) {
         finalLinksUrl = redirectUrlMatch[1];
     } else {
-        // Fallback for meta refreshes or if already on the final page
         const metaRefresh = redirectHtml.match(/<meta[^>]+url=['"]?([^'">]+)['"]?/i);
         if (metaRefresh) {
             finalLinksUrl = metaRefresh[1];
@@ -345,14 +324,12 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
         }
     }
 
-    if (!finalLinksUrl)
-      return [];
+    if (!finalLinksUrl) return [];
 
     let linksHtml = redirectHtml;
     if (finalLinksUrl !== hubCloudUrl) {
         linksHtml = yield fetchText(finalLinksUrl, { headers: { Referer: hubCloudUrl } });
-        if (!linksHtml)
-          return [];
+        if (!linksHtml) return [];
     }
     
     const $ = cheerio2.load(linksHtml);
@@ -364,13 +341,28 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
       title: titleText || baseMeta.title
     });
 
+    // Check for the direct download / routing button and add proxy flag
+    let directDownloadBtn = $("#download").attr("href");
+    if (!directDownloadBtn) {
+        // Fallback to JS variable if button is hidden
+        const match = linksHtml.match(/var url\s*=\s*['"]([^'"]+)['"];/i);
+        if (match) directDownloadBtn = match[1];
+    }
+
+    if (directDownloadBtn && directDownloadBtn.includes("hubrouting")) {
+      results.push({
+        source: "HubCloud",
+        url: directDownloadBtn,
+        meta: currentMeta,
+        requiresProxy: true // Custom flag picked up by getStreams mapping
+      });
+    }
+
     $("a").each((_, el) => {
       const text = $(el).text().toLowerCase();
       const href = $(el).attr("href");
-      if (!href || href === "#" || href.includes("javascript:"))
-        return;
+      if (!href || href === "#" || href.includes("javascript:")) return;
 
-      // Made matching broader and case insensitive
       if (text.includes("fsl") || text.includes("download file") || text.includes("direct download") || text.includes("instant")) {
         results.push({
           source: "FSL",
@@ -395,22 +387,25 @@ var cheerio3 = require("cheerio-without-node-native");
 function getStreams(tmdbId, type, season, episode) {
   return __async(this, null, function* () {
     const tmdbDetails = yield getTmdbDetails(tmdbId, type);
-    if (!tmdbDetails)
-      return [];
+    if (!tmdbDetails) return [];
     const { title, year } = tmdbDetails;
     console.log(`[4KHDHub] Search: ${title} (${year})`);
+    
     const isSeries = type === "series" || type === "tv";
     const pageUrl = yield fetchPageUrl(title, year, isSeries);
+    
     if (!pageUrl) {
       console.log("[4KHDHub] Page not found");
       return [];
     }
+    
     console.log(`[4KHDHub] Found page: ${pageUrl}`);
     const html = yield fetchText(pageUrl);
-    if (!html)
-      return [];
+    if (!html) return [];
+    
     const $ = cheerio3.load(html);
     const itemsToProcess = [];
+    
     if (isSeries && season && episode) {
       const seasonStr = "S" + String(season).padStart(2, "0");
       const episodeStr = "Episode-" + String(episode).padStart(2, "0");
@@ -427,6 +422,7 @@ function getStreams(tmdbId, type, season, episode) {
         itemsToProcess.push(el);
       });
     }
+    
     console.log(`[4KHDHub] Processing ${itemsToProcess.length} items`);
     const streamPromises = itemsToProcess.map((item) => __async(this, null, function* () {
       try {
@@ -434,15 +430,31 @@ function getStreams(tmdbId, type, season, episode) {
         if (sourceResult && sourceResult.url) {
           console.log(`[4KHDHub] Extracting from HubCloud: ${sourceResult.url}`);
           const extractedLinks = yield extractHubCloud(sourceResult.url, sourceResult.meta);
-          return extractedLinks.map((link) => ({
-            name: `4KHDHub - ${link.source}${sourceResult.meta.height ? ` ${sourceResult.meta.height}p` : ""}`,
-            title: `${link.meta.title}\n${formatBytes(link.meta.bytes || 0)}`,
-            url: link.url,
-            quality: sourceResult.meta.height ? `${sourceResult.meta.height}p` : void 0,
-            behaviorHints: {
-              bingeGroup: `4khdhub-${link.source}`
+          
+          return extractedLinks.map((link) => {
+            const stream = {
+              name: `4KHDHub - ${link.source}${sourceResult.meta.height ? ` ${sourceResult.meta.height}p` : ""}`,
+              title: `${link.meta.title}\n${formatBytes(link.meta.bytes || 0)}`,
+              url: link.url,
+              quality: sourceResult.meta.height ? `${sourceResult.meta.height}p` : undefined,
+              behaviorHints: {
+                bingeGroup: `4khdhub-${link.source}`
+              }
+            };
+
+            // Inject the proxyHeaders to bypass hotlink protection if flagged
+            if (link.requiresProxy) {
+              stream.behaviorHints.notWebReady = true;
+              stream.behaviorHints.proxyHeaders = {
+                request: {
+                  "Referer": "https://hubcloud.foo/", 
+                  "User-Agent": USER_AGENT,
+                  "Cookie": "xla=s4t;"
+                }
+              };
             }
-          }));
+            return stream;
+          });
         }
         return [];
       } catch (err) {
@@ -450,6 +462,7 @@ function getStreams(tmdbId, type, season, episode) {
         return [];
       }
     }));
+    
     const results = yield Promise.all(streamPromises);
     return results.reduce((acc, val) => acc.concat(val), []);
   });
