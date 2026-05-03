@@ -1,6 +1,6 @@
 /**
  * 4khdhub - Built from src/4khdhub/
- * Updated for Nuvio: Deep Redirect Resolution to raw .mkv/.mp4 files
+ * Updated for Nuvio: Deep Redirect Resolution to bypass TinyURL & HubRouting
  */
 "use strict";
 var __defProp = Object.defineProperty;
@@ -25,18 +25,10 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 var __async = (__this, __arguments, generator) => {
   return new Promise((resolve, reject) => {
     var fulfilled = (value) => {
-      try {
-        step(generator.next(value));
-      } catch (e) {
-        reject(e);
-      }
+      try { step(generator.next(value)); } catch (e) { reject(e); }
     };
     var rejected = (value) => {
-      try {
-        step(generator.throw(value));
-      } catch (e) {
-        reject(e);
-      }
+      try { step(generator.throw(value)); } catch (e) { reject(e); }
     };
     var step = (x) => x.done ? resolve(x.value) : Promise.resolve(x.value).then(fulfilled, rejected);
     step((generator = generator.apply(__this, __arguments)).next());
@@ -67,20 +59,12 @@ function fetchLatestDomain() {
   });
 }
 
-// src/4khdhub/http.js
 function fetchText(_0) {
   return __async(this, arguments, function* (url, options = {}) {
     try {
-      const response = yield fetch(url, {
-        headers: __spreadValues({
-          "User-Agent": USER_AGENT
-        }, options.headers)
-      });
+      const response = yield fetch(url, { headers: __spreadValues({ "User-Agent": USER_AGENT }, options.headers) });
       return yield response.text();
-    } catch (err) {
-      console.log(`[4KHDHub] Request failed for ${url}: ${err.message}`);
-      return null;
-    }
+    } catch (err) { return null; }
   });
 }
 
@@ -94,19 +78,11 @@ function getTmdbDetails(tmdbId, type) {
       const response = yield fetch(url);
       const data = yield response.json();
       if (isSeries) {
-        return {
-          title: data.name,
-          year: data.first_air_date ? parseInt(data.first_air_date.split("-")[0]) : 0
-        };
+        return { title: data.name, year: data.first_air_date ? parseInt(data.first_air_date.split("-")[0]) : 0 };
       } else {
-        return {
-          title: data.title,
-          year: data.release_date ? parseInt(data.release_date.split("-")[0]) : 0
-        };
+        return { title: data.title, year: data.release_date ? parseInt(data.release_date.split("-")[0]) : 0 };
       }
-    } catch (error) {
-      return null;
-    }
+    } catch (error) { return null; }
   });
 }
 
@@ -114,9 +90,6 @@ function getTmdbDetails(tmdbId, type) {
 function atob(input) {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
   let str = String(input).replace(/=+$/, "");
-  if (str.length % 4 === 1) {
-    throw new Error("'atob' failed: The string to be decoded is not correctly encoded.");
-  }
   let output = "";
   for (let bc = 0, bs, buffer, i = 0; buffer = str.charAt(i++); ~buffer && (bs = bc % 4 ? bs * 64 + buffer : buffer, bc++ % 4) ? output += String.fromCharCode(255 & bs >> (-2 * bc & 6)) : 0) {
     buffer = chars.indexOf(buffer);
@@ -124,24 +97,15 @@ function atob(input) {
   return output;
 }
 function rot13Cipher(str) {
-  return str.replace(/[a-zA-Z]/g, function(c) {
-    return String.fromCharCode((c <= "Z" ? 90 : 122) >= (c = c.charCodeAt(0) + 13) ? c : c - 26);
-  });
+  return str.replace(/[a-zA-Z]/g, function(c) { return String.fromCharCode((c <= "Z" ? 90 : 122) >= (c = c.charCodeAt(0) + 13) ? c : c - 26); });
 }
 function levenshteinDistance(s, t) {
   if (s === t) return 0;
-  const n = s.length;
-  const m = t.length;
-  if (n === 0) return m;
-  if (m === 0) return n;
+  const n = s.length; const m = t.length;
+  if (n === 0) return m; if (m === 0) return n;
   const d = [];
-  for (let i = 0; i <= n; i++) {
-    d[i] = [];
-    d[i][0] = i;
-  }
-  for (let j = 0; j <= m; j++) {
-    d[0][j] = j;
-  }
+  for (let i = 0; i <= n; i++) { d[i] = []; d[i][0] = i; }
+  for (let j = 0; j <= m; j++) { d[0][j] = j; }
   for (let i = 1; i <= n; i++) {
     for (let j = 1; j <= m; j++) {
       const cost = s.charAt(i - 1) === t.charAt(j - 1) ? 0 : 1;
@@ -151,23 +115,18 @@ function levenshteinDistance(s, t) {
   return d[n][m];
 }
 function parseBytes(val) {
-  if (typeof val === "number") return val;
-  if (!val) return 0;
-  const match = val.match(/^([0-9.]+)\s*([a-zA-Z]+)$/);
-  if (!match) return 0;
-  const num = parseFloat(match[1]);
-  const unit = match[2].toLowerCase();
+  if (typeof val === "number") return val; if (!val) return 0;
+  const match = val.match(/^([0-9.]+)\s*([a-zA-Z]+)$/); if (!match) return 0;
+  const num = parseFloat(match[1]); const unit = match[2].toLowerCase();
   let multiplier = 1;
   if (unit.indexOf("k") === 0) multiplier = 1024;
   else if (unit.indexOf("m") === 0) multiplier = 1024 * 1024;
   else if (unit.indexOf("g") === 0) multiplier = 1024 * 1024 * 1024;
-  else if (unit.indexOf("t") === 0) multiplier = 1024 * 1024 * 1024 * 1024;
   return num * multiplier;
 }
 function formatBytes(val) {
   if (val === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB", "TB"];
+  const k = 1024; const sizes = ["B", "KB", "MB", "GB", "TB"];
   let i = Math.floor(Math.log(val) / Math.log(k));
   if (i < 0) i = 0;
   return parseFloat((val / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
@@ -222,6 +181,73 @@ function resolveRedirectUrl(redirectUrl) {
   });
 }
 
+// --- NEW DEEP RESOLVER FUNCTION ---
+function resolveDeepLink(startUrl, referer) {
+  return __async(this, null, function* () {
+    let currentUrl = startUrl;
+    let attempts = 0;
+    
+    while (attempts < 5) {
+      attempts++;
+      try {
+        const res = yield fetch(currentUrl, {
+          method: 'GET',
+          redirect: 'follow', // Naturally unwrap TinyURL and basic 301/302 redirects
+          headers: { "Referer": referer, "User-Agent": USER_AGENT, "Cookie": "xla=s4t;" }
+        });
+
+        // 1. If fetch natively followed it to the end, update the tracking URL
+        if (res.url && res.url !== currentUrl) {
+            currentUrl = res.url;
+        }
+
+        const contentType = res.headers.get("content-type") || "";
+        const contentLength = parseInt(res.headers.get("content-length") || "0");
+
+        // 2. Target Acquired: Check if we landed directly on the media file 
+        if (contentType.includes("video") || contentType.includes("octet-stream") || contentLength > 2000000) {
+            break; 
+        }
+
+        // 3. Fallback: Parse the HTML to look for HubRouting/HubCloud manual redirects
+        const text = yield res.text();
+        const $ = cheerio2.load(text);
+        let nextUrl = null;
+
+        // Check for HTML Meta Refresh (e.g. <meta http-equiv="refresh" content="0; url=https://gpdl...">)
+        const metaMatch = text.match(/url=(https?:\/\/[^'"]+)/i);
+        if (metaMatch && metaMatch[1]) nextUrl = metaMatch[1].trim();
+
+        // Check for JS redirects
+        if (!nextUrl) {
+            const jsMatch = text.match(/window\.location(?:\.href)?\s*=\s*['"](https?:\/\/[^'"]+)['"]/i);
+            if (jsMatch && jsMatch[1]) nextUrl = jsMatch[1].trim();
+        }
+
+        // Check for direct "Click Here to Download" tags inside HubRouting
+        if (!nextUrl) {
+            nextUrl = $("a").filter((_, el) => {
+                const href = $(el).attr("href") || "";
+                return href.includes("diskcdn") || href.includes("gpdl") || href.includes("hubcdn");
+            }).attr("href");
+        }
+
+        // If we found a deeper link, continue the loop
+        if (nextUrl && nextUrl !== currentUrl) {
+            currentUrl = nextUrl;
+            continue;
+        }
+
+        break; // No further redirects found
+      } catch (e) {
+        break; // Stop on network error and return what we have
+      }
+    }
+    return currentUrl;
+  });
+}
+// ------------------------------------
+
 function extractSourceResults($, el) {
   return __async(this, null, function* () {
     const localHtml = $(el).html();
@@ -239,8 +265,9 @@ function extractSourceResults($, el) {
     $(el).find("a").each((_, a) => {
         const text = $(a).text().toLowerCase();
         const href = $(a).attr("href") || "";
-        const isMatch = targetKeywords.some(keyword => text.includes(keyword) || href.toLowerCase().includes(keyword));
-        if (isMatch && !targetLink) targetLink = href;
+        if (targetKeywords.some(keyword => text.includes(keyword) || href.toLowerCase().includes(keyword))) {
+            if (!targetLink) targetLink = href;
+        }
     });
 
     if (targetLink) {
@@ -276,15 +303,11 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
     let finalLinksUrl = null;
     const redirectUrlMatch = redirectHtml.match(/url\s*=\s*['"]([^'"]+)['"]/i);
     
-    if (redirectUrlMatch) {
-        finalLinksUrl = redirectUrlMatch[1];
-    } else {
+    if (redirectUrlMatch) finalLinksUrl = redirectUrlMatch[1];
+    else {
         const metaRefresh = redirectHtml.match(/<meta[^>]+url=['"]?([^'">]+)['"]?/i);
-        if (metaRefresh) {
-            finalLinksUrl = metaRefresh[1];
-        } else if (redirectHtml.includes('class="btn') || redirectHtml.includes('id="size"')) {
-            finalLinksUrl = hubCloudUrl;
-        }
+        if (metaRefresh) finalLinksUrl = metaRefresh[1];
+        else if (redirectHtml.includes('class="btn') || redirectHtml.includes('id="size"')) finalLinksUrl = hubCloudUrl;
     }
 
     if (!finalLinksUrl) return [];
@@ -296,66 +319,49 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
     }
     
     const $ = cheerio2.load(linksHtml);
-    const results = [];
     const currentMeta = __spreadProps(__spreadValues({}, baseMeta), {
       bytes: parseBytes($("#size").text()) || baseMeta.bytes,
       title: $("title").text().trim() || baseMeta.title
     });
 
-    let directDownloadBtn = $("#download").attr("href");
-    if (!directDownloadBtn) {
+    let rawLinks = [];
+
+    // Extract the primary routing button
+    let directBtn = $("#download").attr("href");
+    if (!directBtn) {
         const match = linksHtml.match(/var url\s*=\s*['"]([^'"]+)['"];/i);
-        if (match) directDownloadBtn = match[1];
+        if (match) directBtn = match[1];
     }
+    if (directBtn) rawLinks.push({ source: "Direct", url: directBtn });
 
-    if (directDownloadBtn && (directDownloadBtn.includes("hubrouting") || directDownloadBtn.includes("gpdl") || directDownloadBtn.includes("hubcdn"))) {
-      
-      let finalStreamUrl = directDownloadBtn;
-
-      // === NUVIO FIX: Aggressively follow the PHP redirect to grab the exact .mkv / .mp4 URL ===
-      try {
-        const routingRes = yield fetch(directDownloadBtn, {
-            headers: { "Referer": rootDomain, "User-Agent": USER_AGENT, "Cookie": "xla=s4t;" }
-        });
-
-        // 1. Check if the browser/polyfill auto-followed the redirect to the final file
-        if (routingRes.url && !routingRes.url.includes("hubrouting") && !routingRes.url.includes(".php")) {
-            finalStreamUrl = routingRes.url;
-        } else {
-            // 2. If it returned HTML instead of auto-following, scrape the HTML for the final location
-            const routingText = yield routingRes.text();
-            const locationMatch = routingText.match(/(?:window\.location\.href|url)\s*=\s*['"]([^'"]+)['"]/i) || routingText.match(/<meta[^>]+url=['"]?([^'">]+)['"]?/i);
-            
-            if (locationMatch && locationMatch[1].startsWith('http')) {
-                finalStreamUrl = locationMatch[1];
-            }
-        }
-      } catch (err) {
-        console.log(`[4KHDHub] Failed to bypass routing link: ${err.message}`);
-      }
-
-      results.push({
-        source: "Direct", // Renamed to Direct to match Nuvio UI cleanly
-        url: finalStreamUrl, 
-        meta: currentMeta,
-        isResolved: true // Flag to tell the builder we don't need proxy headers anymore
-      });
-    }
-
+    // Extract auxiliary buttons (10Gbps / FSL)
     $("a").each((_, el) => {
       const text = $(el).text().toLowerCase();
       const href = $(el).attr("href");
       if (!href || href === "#" || href.includes("javascript:")) return;
 
       if (text.includes("fsl") || text.includes("10gbps")) {
-        results.push({
-          source: text.includes("10gbps") ? "10Gbps" : "FSL",
-          url: href,
-          meta: currentMeta,
-          isResolved: true
-        });
+        rawLinks.push({ source: text.includes("10gbps") ? "10Gbps" : "FSL", url: href });
       }
     });
+
+    // Deep Resolve all extracted links
+    const results = [];
+    for (const linkObj of rawLinks) {
+        // Run it through our new Deep Resolver
+        const finalUrl = yield resolveDeepLink(linkObj.url, rootDomain);
+        
+        // Push the finalized diskcdn/gpdl url to the Stremio array
+        if (finalUrl) {
+            results.push({
+               source: linkObj.source,
+               url: finalUrl,
+               meta: currentMeta,
+               // If it successfully unraveled the proxy, tag it true so we don't inject proxy headers later
+               isResolved: finalUrl.includes("diskcdn") || finalUrl.includes("gpdl") || finalUrl.includes("hubcdn")
+            });
+        }
+    }
 
     return results;
   });
@@ -404,19 +410,14 @@ function getStreams(tmdbId, type, season, episode) {
               title: `${link.meta.title}\n${formatBytes(link.meta.bytes || 0)}`,
               url: link.url,
               quality: sourceResult.meta.height ? `${sourceResult.meta.height}p` : undefined,
-              behaviorHints: {
-                bingeGroup: `4khdhub-${link.source}`
-              }
+              behaviorHints: { bingeGroup: `4khdhub-${link.source}` }
             };
 
-            // If it hasn't been deeply resolved, fallback to proxy headers (Nuvio players hate this, so we prefer the resolve bypass above)
+            // Only add headers if the Deep Resolver failed to bypass the CDNs 
+            // (Nuvio plays much nicer natively without injected proxies)
             if (!link.isResolved) {
               stream.behaviorHints.notWebReady = true;
-              stream.behaviorHints.proxyHeaders = {
-                request: {
-                  "User-Agent": USER_AGENT
-                }
-              };
+              stream.behaviorHints.proxyHeaders = { request: { "User-Agent": USER_AGENT } };
             }
             return stream;
           });
