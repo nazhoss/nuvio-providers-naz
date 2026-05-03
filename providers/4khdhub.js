@@ -1,6 +1,6 @@
 /**
  * 4khdhub - Built from src/4khdhub/
- * Updated with resilient link extraction & Hotlink Bypass (Proxy Headers)
+ * Updated with resilient link extraction, Hotlink Bypass, & CDN Support
  */
 "use strict";
 var __defProp = Object.defineProperty;
@@ -265,41 +265,40 @@ function extractSourceResults($, el) {
       title
     };
 
-    const hubCloudLink = $(el).find("a").filter((_, a) => {
+    // Broadened to catch all known variations of the CDN
+    const targetKeywords = ["hubcloud", "hubdrive", "hubcdn", "gpdl", "vcloud"];
+    let targetLink = null;
+    
+    $(el).find("a").each((_, a) => {
         const text = $(a).text().toLowerCase();
         const href = $(a).attr("href") || "";
-        return text.includes("hubcloud") || href.toLowerCase().includes("hubcloud");
-    }).attr("href");
+        const isMatch = targetKeywords.some(keyword => text.includes(keyword) || href.toLowerCase().includes(keyword));
+        if (isMatch && !targetLink) {
+            targetLink = href;
+        }
+    });
 
-    if (hubCloudLink) {
-      const resolved = yield resolveRedirectUrl(hubCloudLink);
-      return { url: resolved || hubCloudLink, meta };
-    }
-
-    const hubDriveLink = $(el).find("a").filter((_, a) => {
-        const text = $(a).text().toLowerCase();
-        const href = $(a).attr("href") || "";
-        return text.includes("hubdrive") || href.toLowerCase().includes("hubdrive");
-    }).attr("href");
-
-    if (hubDriveLink) {
-      const resolvedDrive = yield resolveRedirectUrl(hubDriveLink) || hubDriveLink;
-      if (resolvedDrive) {
-        const hubDriveHtml = yield fetchText(resolvedDrive);
-        if (hubDriveHtml) {
-          const $2 = cheerio2.load(hubDriveHtml);
-          const innerCloudLink = $2("a").filter((_, a) => {
+    if (targetLink) {
+      let resolved = yield resolveRedirectUrl(targetLink) || targetLink;
+      
+      // If it resolved to HubDrive, we must dig deeper to find the actual Cloud/CDN link
+      if (resolved && resolved.toLowerCase().includes("hubdrive")) {
+        const innerHtml = yield fetchText(resolved);
+        if (innerHtml) {
+          const $2 = cheerio2.load(innerHtml);
+          const innerLink = $2("a").filter((_, a) => {
               const text = $2(a).text().toLowerCase();
               const href = $2(a).attr("href") || "";
-              return text.includes("hubcloud") || href.toLowerCase().includes("hubcloud");
+              return targetKeywords.some(keyword => text.includes(keyword) || href.toLowerCase().includes(keyword));
           }).attr("href");
           
-          if (innerCloudLink) {
-            return { url: innerCloudLink, meta };
-          }
+          if (innerLink) resolved = innerLink;
         }
       }
+      
+      return { url: resolved, meta };
     }
+    
     return null;
   });
 }
@@ -307,7 +306,12 @@ function extractSourceResults($, el) {
 function extractHubCloud(hubCloudUrl, baseMeta) {
   return __async(this, null, function* () {
     if (!hubCloudUrl) return [];
-    const redirectHtml = yield fetchText(hubCloudUrl, { headers: { Referer: hubCloudUrl } });
+    
+    // Dynamic Referer based on the extracted URL (vital for bypassing hotlink protection across different CDNs)
+    const urlObj = new URL(hubCloudUrl);
+    const rootDomain = `${urlObj.protocol}//${urlObj.hostname}/`;
+    
+    const redirectHtml = yield fetchText(hubCloudUrl, { headers: { Referer: rootDomain } });
     if (!redirectHtml) return [];
     
     let finalLinksUrl = null;
@@ -328,7 +332,7 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
 
     let linksHtml = redirectHtml;
     if (finalLinksUrl !== hubCloudUrl) {
-        linksHtml = yield fetchText(finalLinksUrl, { headers: { Referer: hubCloudUrl } });
+        linksHtml = yield fetchText(finalLinksUrl, { headers: { Referer: rootDomain } });
         if (!linksHtml) return [];
     }
     
@@ -341,20 +345,19 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
       title: titleText || baseMeta.title
     });
 
-    // Check for the direct download / routing button and add proxy flag
     let directDownloadBtn = $("#download").attr("href");
     if (!directDownloadBtn) {
-        // Fallback to JS variable if button is hidden
         const match = linksHtml.match(/var url\s*=\s*['"]([^'"]+)['"];/i);
         if (match) directDownloadBtn = match[1];
     }
 
-    if (directDownloadBtn && directDownloadBtn.includes("hubrouting")) {
+    if (directDownloadBtn && (directDownloadBtn.includes("hubrouting") || directDownloadBtn.includes("gpdl") || directDownloadBtn.includes("hubcdn"))) {
       results.push({
-        source: "HubCloud",
+        source: directDownloadBtn.includes("gpdl") ? "GPDL Stream" : "HubCloud Stream",
         url: directDownloadBtn,
         meta: currentMeta,
-        requiresProxy: true // Custom flag picked up by getStreams mapping
+        requiresProxy: true,
+        proxyHost: rootDomain // Passing dynamic proxy domain downstream
       });
     }
 
@@ -428,7 +431,7 @@ function getStreams(tmdbId, type, season, episode) {
       try {
         const sourceResult = yield extractSourceResults($, item);
         if (sourceResult && sourceResult.url) {
-          console.log(`[4KHDHub] Extracting from HubCloud: ${sourceResult.url}`);
+          console.log(`[4KHDHub] Extracting from host: ${sourceResult.url}`);
           const extractedLinks = yield extractHubCloud(sourceResult.url, sourceResult.meta);
           
           return extractedLinks.map((link) => {
@@ -447,7 +450,7 @@ function getStreams(tmdbId, type, season, episode) {
               stream.behaviorHints.notWebReady = true;
               stream.behaviorHints.proxyHeaders = {
                 request: {
-                  "Referer": "https://hubcloud.foo/", 
+                  "Referer": link.proxyHost, 
                   "User-Agent": USER_AGENT,
                   "Cookie": "xla=s4t;"
                 }
