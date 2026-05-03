@@ -1,6 +1,6 @@
 /**
  * 4khdhub - Built from src/4khdhub/
- * Updated with resilient link extraction, Hotlink Bypass, & CDN Support
+ * Updated with resilient link extraction, Hotlink Bypass, CDN Support, & Input Field Parsing
  */
 "use strict";
 var __defProp = Object.defineProperty;
@@ -307,7 +307,7 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
   return __async(this, null, function* () {
     if (!hubCloudUrl) return [];
     
-    // Dynamic Referer based on the extracted URL (vital for bypassing hotlink protection across different CDNs)
+    // Dynamic Referer based on the extracted URL
     const urlObj = new URL(hubCloudUrl);
     const rootDomain = `${urlObj.protocol}//${urlObj.hostname}/`;
     
@@ -345,6 +345,20 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
       title: titleText || baseMeta.title
     });
 
+    // Extract the main drive link from the text input box
+    $("input").each((_, el) => {
+      const val = $(el).val();
+      if (val && (val.includes("hubcloud") || val.includes("drive") || val.includes("hubcdn"))) {
+        results.push({
+          source: "HubCloud Main Drive",
+          url: val,
+          meta: currentMeta,
+          requiresProxy: true,
+          proxyHost: rootDomain 
+        });
+      }
+    });
+
     let directDownloadBtn = $("#download").attr("href");
     if (!directDownloadBtn) {
         const match = linksHtml.match(/var url\s*=\s*['"]([^'"]+)['"];/i);
@@ -357,7 +371,7 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
         url: directDownloadBtn,
         meta: currentMeta,
         requiresProxy: true,
-        proxyHost: rootDomain // Passing dynamic proxy domain downstream
+        proxyHost: rootDomain 
       });
     }
 
@@ -366,9 +380,9 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
       const href = $(el).attr("href");
       if (!href || href === "#" || href.includes("javascript:")) return;
 
-      if (text.includes("fsl") || text.includes("download file") || text.includes("direct download") || text.includes("instant")) {
+      if (text.includes("fsl") || text.includes("download file") || text.includes("direct download") || text.includes("instant") || text.includes("10gbps")) {
         results.push({
-          source: "FSL",
+          source: text.includes("10gbps") ? "10Gbps Server" : "FSL",
           url: href,
           meta: currentMeta
         });
