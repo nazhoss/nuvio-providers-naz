@@ -1,6 +1,6 @@
 /**
  * 4khdhub - Built from src/4khdhub/
- * Updated with resilient link extraction, Hotlink Bypass, CDN Support, & Input Field Parsing
+ * Updated with resilient link extraction, Hotlink Bypass, CDN Support, & Redirect Resolution
  */
 "use strict";
 var __defProp = Object.defineProperty;
@@ -366,9 +366,35 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
     }
 
     if (directDownloadBtn && (directDownloadBtn.includes("hubrouting") || directDownloadBtn.includes("gpdl") || directDownloadBtn.includes("hubcdn"))) {
+      
+      let finalStreamUrl = directDownloadBtn;
+
+      // Force fetch to resolve the 302 redirect and grab the raw media URL for Stremio
+      try {
+        const redirectRes = yield fetch(directDownloadBtn, {
+          method: 'HEAD', // Use HEAD to just get the headers without downloading the video
+          redirect: 'manual', // Stop at the redirect to grab the Location header
+          headers: {
+            "Referer": rootDomain,
+            "User-Agent": USER_AGENT,
+            "Cookie": "xla=s4t;"
+          }
+        });
+
+        // If it returns a 30x redirect, grab the 'location' header
+        if (redirectRes.status >= 300 && redirectRes.status < 400 && redirectRes.headers.has('location')) {
+          finalStreamUrl = redirectRes.headers.get('location');
+        } else if (redirectRes.url && redirectRes.url !== directDownloadBtn) {
+           // Some fetch implementations follow automatically, grab the final URL
+          finalStreamUrl = redirectRes.url;
+        }
+      } catch (err) {
+        console.log(`[4KHDHub] Could not resolve routing URL: ${err.message}`);
+      }
+
       results.push({
         source: directDownloadBtn.includes("gpdl") ? "GPDL Stream" : "HubCloud Stream",
-        url: directDownloadBtn,
+        url: finalStreamUrl, 
         meta: currentMeta,
         requiresProxy: true,
         proxyHost: rootDomain 
