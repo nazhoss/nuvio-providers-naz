@@ -1,6 +1,7 @@
 /**
  * 4khdhub - Built from src/4khdhub/
  * Generated: 2025-12-31T21:33:16.718Z
+ * Updated with resilient link extraction fixes
  */
 "use strict";
 var __defProp = Object.defineProperty;
@@ -204,8 +205,6 @@ function fetchPageUrl(name, year, isSeries) {
     console.log(`[4KHDHub] Parsing search results for type: ${targetType}`);
     const matchingCards = $(".movie-card").filter((_, el) => {
       const hasFormat = $(el).find(`.movie-card-format:contains("${targetType}")`).length > 0;
-      if (!hasFormat) {
-      }
       return hasFormat;
     }).filter((_, el) => {
       const metaText = $(el).find(".movie-card-meta").text();
@@ -245,7 +244,8 @@ function resolveRedirectUrl(redirectUrl) {
     if (!redirectHtml)
       return null;
     try {
-      const redirectDataMatch = redirectHtml.match(/'o','(.*?)'/);
+      // Made regex more tolerant of spaces 
+      const redirectDataMatch = redirectHtml.match(/'o',\s*'(.*?)'/);
       if (!redirectDataMatch)
         return null;
       const step1 = atob(redirectDataMatch[1]);
@@ -262,14 +262,16 @@ function resolveRedirectUrl(redirectUrl) {
     return null;
   });
 }
+
 function extractSourceResults($, el) {
   return __async(this, null, function* () {
     const localHtml = $(el).html();
-    const sizeMatch = localHtml.match(/([\d.]+ ?[GM]B)/);
-    const heightMatch = localHtml.match(/\d{3,}p/);
+    const sizeMatch = localHtml.match(/([\d.]+ ?[GM]B)/i); // Case insensitive
+    const heightMatch = localHtml.match(/\d{3,}p/i);
     const title = $(el).find(".file-title, .episode-file-title").text().trim();
     let height = heightMatch ? parseInt(heightMatch[0]) : 0;
-    if (height === 0 && (title.includes("4K") || title.includes("4k") || localHtml.includes("4K") || localHtml.includes("4k"))) {
+    
+    if (height === 0 && (/4k/i.test(title) || /4k/i.test(localHtml))) {
       height = 2160;
     }
     const meta = {
@@ -277,19 +279,38 @@ function extractSourceResults($, el) {
       height,
       title
     };
-    const hubCloudLink = $(el).find("a").filter((_, a) => $(a).text().includes("HubCloud")).attr("href");
+
+    // Case-insensitive fallback lookup for HubCloud buttons
+    const hubCloudLink = $(el).find("a").filter((_, a) => {
+        const text = $(a).text().toLowerCase();
+        const href = $(a).attr("href") || "";
+        return text.includes("hubcloud") || href.toLowerCase().includes("hubcloud");
+    }).attr("href");
+
     if (hubCloudLink) {
       const resolved = yield resolveRedirectUrl(hubCloudLink);
-      return { url: resolved, meta };
+      return { url: resolved || hubCloudLink, meta }; // Fallback to raw link if resolver fails
     }
-    const hubDriveLink = $(el).find("a").filter((_, a) => $(a).text().includes("HubDrive")).attr("href");
+
+    // Case-insensitive fallback lookup for HubDrive buttons
+    const hubDriveLink = $(el).find("a").filter((_, a) => {
+        const text = $(a).text().toLowerCase();
+        const href = $(a).attr("href") || "";
+        return text.includes("hubdrive") || href.toLowerCase().includes("hubdrive");
+    }).attr("href");
+
     if (hubDriveLink) {
-      const resolvedDrive = yield resolveRedirectUrl(hubDriveLink);
+      const resolvedDrive = yield resolveRedirectUrl(hubDriveLink) || hubDriveLink;
       if (resolvedDrive) {
         const hubDriveHtml = yield fetchText(resolvedDrive);
         if (hubDriveHtml) {
           const $2 = cheerio2.load(hubDriveHtml);
-          const innerCloudLink = $2('a:contains("HubCloud")').attr("href");
+          const innerCloudLink = $2("a").filter((_, a) => {
+              const text = $2(a).text().toLowerCase();
+              const href = $2(a).attr("href") || "";
+              return text.includes("hubcloud") || href.toLowerCase().includes("hubcloud");
+          }).attr("href");
+          
           if (innerCloudLink) {
             return { url: innerCloudLink, meta };
           }
@@ -299,6 +320,7 @@ function extractSourceResults($, el) {
     return null;
   });
 }
+
 function extractHubCloud(hubCloudUrl, baseMeta) {
   return __async(this, null, function* () {
     if (!hubCloudUrl)
@@ -306,13 +328,33 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
     const redirectHtml = yield fetchText(hubCloudUrl, { headers: { Referer: hubCloudUrl } });
     if (!redirectHtml)
       return [];
-    const redirectUrlMatch = redirectHtml.match(/var url ?= ?'(.*?)'/);
-    if (!redirectUrlMatch)
+    
+    // Broadened regex to accept varying spaces and quote types
+    let finalLinksUrl = null;
+    const redirectUrlMatch = redirectHtml.match(/url\s*=\s*['"]([^'"]+)['"]/i);
+    
+    if (redirectUrlMatch) {
+        finalLinksUrl = redirectUrlMatch[1];
+    } else {
+        // Fallback for meta refreshes or if already on the final page
+        const metaRefresh = redirectHtml.match(/<meta[^>]+url=['"]?([^'">]+)['"]?/i);
+        if (metaRefresh) {
+            finalLinksUrl = metaRefresh[1];
+        } else if (redirectHtml.includes('class="btn') || redirectHtml.includes('id="size"')) {
+            finalLinksUrl = hubCloudUrl;
+        }
+    }
+
+    if (!finalLinksUrl)
       return [];
-    const finalLinksUrl = redirectUrlMatch[1];
-    const linksHtml = yield fetchText(finalLinksUrl, { headers: { Referer: hubCloudUrl } });
-    if (!linksHtml)
-      return [];
+
+    let linksHtml = redirectHtml;
+    if (finalLinksUrl !== hubCloudUrl) {
+        linksHtml = yield fetchText(finalLinksUrl, { headers: { Referer: hubCloudUrl } });
+        if (!linksHtml)
+          return [];
+    }
+    
     const $ = cheerio2.load(linksHtml);
     const results = [];
     const sizeText = $("#size").text();
@@ -321,18 +363,21 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
       bytes: parseBytes(sizeText) || baseMeta.bytes,
       title: titleText || baseMeta.title
     });
+
     $("a").each((_, el) => {
-      const text = $(el).text();
+      const text = $(el).text().toLowerCase();
       const href = $(el).attr("href");
-      if (!href)
+      if (!href || href === "#" || href.includes("javascript:"))
         return;
-      if (text.includes("FSL") || text.includes("Download File")) {
+
+      // Made matching broader and case insensitive
+      if (text.includes("fsl") || text.includes("download file") || text.includes("direct download") || text.includes("instant")) {
         results.push({
           source: "FSL",
           url: href,
           meta: currentMeta
         });
-      } else if (text.includes("PixelServer")) {
+      } else if (text.includes("pixelserver") || text.includes("pixel")) {
         const pixelUrl = href.replace("/u/", "/api/file/");
         results.push({
           source: "PixelServer",
@@ -391,8 +436,7 @@ function getStreams(tmdbId, type, season, episode) {
           const extractedLinks = yield extractHubCloud(sourceResult.url, sourceResult.meta);
           return extractedLinks.map((link) => ({
             name: `4KHDHub - ${link.source}${sourceResult.meta.height ? ` ${sourceResult.meta.height}p` : ""}`,
-            title: `${link.meta.title}
-${formatBytes(link.meta.bytes || 0)}`,
+            title: `${link.meta.title}\n${formatBytes(link.meta.bytes || 0)}`,
             url: link.url,
             quality: sourceResult.meta.height ? `${sourceResult.meta.height}p` : void 0,
             behaviorHints: {
