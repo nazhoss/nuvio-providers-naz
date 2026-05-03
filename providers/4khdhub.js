@@ -1,7 +1,6 @@
 /**
  * 4khdhub - Built from src/4khdhub/
- * Updated: Adapts to new HubCloud DOM, handles direct CDN links (gpdl, hailmary) 
- * and skips redirect loops when direct links are present.
+ * Updated: Brute-Force Regex Resolver & Strict Filtering
  */
 "use strict";
 var __defProp = Object.defineProperty;
@@ -176,7 +175,7 @@ function resolveRedirectUrl(redirectUrl) {
   });
 }
 
-// Fallback Deep Resolver if they use hubrouting again in the future
+// === THE SLEDGEHAMMER: BRUTE FORCE REGEX RESOLVER ===
 function resolveDeepLink(startUrl, referer) {
   return __async(this, null, function* () {
     let currentUrl = startUrl;
@@ -187,27 +186,28 @@ function resolveDeepLink(startUrl, referer) {
       try {
         const res = yield fetch(currentUrl, {
           method: 'GET',
-          redirect: 'manual', 
+          // Use natural follow so TinyUrl resolves automatically
+          redirect: 'follow', 
           headers: { "Referer": referer, "User-Agent": USER_AGENT, "Cookie": "xla=s4t; xlax=s4t;" }
         });
 
-        if (res.status >= 300 && res.status < 400 && res.headers.has("location")) {
-            let loc = res.headers.get("location");
-            if (loc.startsWith("/")) {
-                const urlObj = new URL(currentUrl);
-                loc = `${urlObj.protocol}//${urlObj.host}${loc}`;
-            }
-            currentUrl = loc;
-            continue; 
-        }
-
-        if (currentUrl.includes("diskcdn") || currentUrl.includes("gpdl") || currentUrl.includes("hubcdn") || currentUrl.includes("hailmary")) {
-            break; 
+        // 1. Did fetch naturally land us on the CDN?
+        if (res.url && (res.url.includes("diskcdn") || res.url.includes("gpdl") || res.url.includes("hubcdn") || res.url.includes("hailmary"))) {
+            return res.url;
         }
 
         const text = yield res.text();
-        let nextUrl = null;
 
+        // 2. BRUTE FORCE REGEX: Scan the entire raw text response for ANY link containing the CDN domains.
+        // This ignores DOM, Meta tags, and JS obfuscation entirely. If the link exists, it pulls it.
+        const rawCdnMatch = text.match(/(https?:\/\/(?:[^\s'"]+)?(?:gpdl|hubcdn|diskcdn|hailmary|vcloud)(?:[^\s'"]+)?)/i);
+        
+        if (rawCdnMatch && rawCdnMatch[1]) {
+            return rawCdnMatch[1]; // Target Acquired!
+        }
+
+        // 3. Fallback: Parse generic redirects (meta refresh, window.location) to keep digging
+        let nextUrl = null;
         const metaMatch = text.match(/url=(https?:\/\/[^'"]+)/i);
         if (metaMatch) nextUrl = metaMatch[1].trim();
 
@@ -220,9 +220,10 @@ function resolveDeepLink(startUrl, referer) {
             currentUrl = nextUrl;
             continue;
         }
-        break; 
+        
+        break; // Dead end
       } catch (e) {
-        break; 
+        break; // Network Error
       }
     }
     return currentUrl;
@@ -281,7 +282,6 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
     let linksHtml = yield fetchText(hubCloudUrl, { headers: { Referer: rootDomain } });
     if (!linksHtml) return [];
     
-    // Some older pages use a meta-refresh; ensure we fetch the inner page if we don't see the direct links yet.
     const redirectUrlMatch = linksHtml.match(/url\s*=\s*['"]([^'"]+)['"]/i);
     if (redirectUrlMatch && !linksHtml.includes('hailmary') && !linksHtml.includes('gpdl')) {
         const finalLinksUrl = redirectUrlMatch[1];
@@ -303,7 +303,6 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
       const href = $(el).attr("href");
       if (!href || href === "#" || href.includes("javascript:")) return;
 
-      // Extract new HailMary/GPDL direct links without forcing them through the deep resolver
       if (href.includes("hailmary.lat") || text.includes("fsl")) {
          rawLinks.push({ source: "FSL", url: href });
       } else if (href.includes("gpdl") || text.includes("10gbps")) {
@@ -313,22 +312,31 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
       }
     });
 
+    // Check main input/download logic as fallback
+    let directDownloadBtn = $("#download").attr("href");
+    if (!directDownloadBtn) {
+        const match = linksHtml.match(/var url\s*=\s*['"]([^'"]+)['"];/i);
+        if (match) directDownloadBtn = match[1];
+    }
+    if (directDownloadBtn && !rawLinks.some(l => l.url === directDownloadBtn)) {
+        rawLinks.push({ source: "Direct", url: directDownloadBtn });
+    }
+
     const results = [];
     for (const linkObj of rawLinks) {
         let finalUrl = linkObj.url;
         
-        // ONLY run the heavy resolver loop if it's hiding behind tinyurl or old hubrouting .php scripts
+        // ONLY run the heavy resolver loop if it's hiding behind an obfuscator
         if (finalUrl.includes("hubrouting") || finalUrl.includes("tinyurl")) {
             finalUrl = yield resolveDeepLink(finalUrl, rootDomain);
         }
         
-        if (finalUrl) {
+        // STRICT FILTER: If it STILL equals hubrouting/tinyurl, drop it. It's unplayable.
+        if (finalUrl && (finalUrl.includes("diskcdn") || finalUrl.includes("gpdl") || finalUrl.includes("hubcdn") || finalUrl.includes("hailmary") || finalUrl.includes("vcloud"))) {
             results.push({
                source: linkObj.source,
                url: finalUrl,
-               meta: currentMeta,
-               // Flag true so Nuvio doesn't inject proxy headers on standard CDNs
-               isResolved: finalUrl.includes("diskcdn") || finalUrl.includes("gpdl") || finalUrl.includes("hubcdn") || finalUrl.includes("hailmary")
+               meta: currentMeta
             });
         }
     }
@@ -376,20 +384,13 @@ function getStreams(tmdbId, type, season, episode) {
           const extractedLinks = yield extractHubCloud(sourceResult.url, sourceResult.meta);
           
           return extractedLinks.map((link) => {
-            const stream = {
+            return {
               name: `4KHDHub - ${link.source}${sourceResult.meta.height ? ` ${sourceResult.meta.height}p` : ""}`,
               title: `${link.meta.title}\n${formatBytes(link.meta.bytes || 0)}`,
               url: link.url,
               quality: sourceResult.meta.height ? `${sourceResult.meta.height}p` : undefined,
               behaviorHints: { bingeGroup: `4khdhub-${link.source}` }
             };
-
-            if (!link.isResolved) {
-              stream.behaviorHints.notWebReady = true;
-              stream.behaviorHints.proxyHeaders = { request: { "User-Agent": USER_AGENT } };
-            }
-
-            return stream;
           });
         }
         return [];
