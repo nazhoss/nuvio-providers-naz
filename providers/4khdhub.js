@@ -1,6 +1,6 @@
 /**
  * 4khdhub - Built from src/4khdhub/
- * Updated with resilient link extraction, True .MKV Resolver, & Token Bypass
+ * Updated for Nuvio: Deep Redirect Resolution to raw .mkv/.mp4 files
  */
 "use strict";
 var __defProp = Object.defineProperty;
@@ -135,8 +135,13 @@ function levenshteinDistance(s, t) {
   if (n === 0) return m;
   if (m === 0) return n;
   const d = [];
-  for (let i = 0; i <= n; i++) { d[i] = []; d[i][0] = i; }
-  for (let j = 0; j <= m; j++) { d[0][j] = j; }
+  for (let i = 0; i <= n; i++) {
+    d[i] = [];
+    d[i][0] = i;
+  }
+  for (let j = 0; j <= m; j++) {
+    d[0][j] = j;
+  }
   for (let i = 1; i <= n; i++) {
     for (let j = 1; j <= m; j++) {
       const cost = s.charAt(i - 1) === t.charAt(j - 1) ? 0 : 1;
@@ -181,7 +186,8 @@ function fetchPageUrl(name, year, isSeries) {
     const matchingCards = $(".movie-card").filter((_, el) => {
       return $(el).find(`.movie-card-format:contains("${targetType}")`).length > 0;
     }).filter((_, el) => {
-      const movieCardYear = parseInt($(el).find(".movie-card-meta").text());
+      const metaText = $(el).find(".movie-card-meta").text();
+      const movieCardYear = parseInt(metaText);
       return !isNaN(movieCardYear) && Math.abs(movieCardYear - year) <= 1;
     }).filter((_, el) => {
       const movieCardTitle = $(el).find(".movie-card-title").text().replace(/\[.*?]/g, "").trim();
@@ -223,18 +229,18 @@ function extractSourceResults($, el) {
     const heightMatch = localHtml.match(/\d{3,}p/i);
     const title = $(el).find(".file-title, .episode-file-title").text().trim();
     let height = heightMatch ? parseInt(heightMatch[0]) : 0;
-    if (height === 0 && (/4k/i.test(title) || /4k/i.test(localHtml))) height = 2160;
     
+    if (height === 0 && (/4k/i.test(title) || /4k/i.test(localHtml))) height = 2160;
     const meta = { bytes: sizeMatch ? parseBytes(sizeMatch[1]) : 0, height, title };
+
     const targetKeywords = ["hubcloud", "hubdrive", "hubcdn", "gpdl", "vcloud"];
     let targetLink = null;
     
     $(el).find("a").each((_, a) => {
         const text = $(a).text().toLowerCase();
         const href = $(a).attr("href") || "";
-        if (targetKeywords.some(keyword => text.includes(keyword) || href.toLowerCase().includes(keyword)) && !targetLink) {
-            targetLink = href;
-        }
+        const isMatch = targetKeywords.some(keyword => text.includes(keyword) || href.toLowerCase().includes(keyword));
+        if (isMatch && !targetLink) targetLink = href;
     });
 
     if (targetLink) {
@@ -246,7 +252,7 @@ function extractSourceResults($, el) {
           const innerLink = $2("a").filter((_, a) => {
               const text = $2(a).text().toLowerCase();
               const href = $2(a).attr("href") || "";
-              return targetKeywords.some(k => text.includes(k) || href.toLowerCase().includes(k));
+              return targetKeywords.some(keyword => text.includes(keyword) || href.toLowerCase().includes(keyword));
           }).attr("href");
           if (innerLink) resolved = innerLink;
         }
@@ -260,6 +266,7 @@ function extractSourceResults($, el) {
 function extractHubCloud(hubCloudUrl, baseMeta) {
   return __async(this, null, function* () {
     if (!hubCloudUrl) return [];
+    
     const urlObj = new URL(hubCloudUrl);
     const rootDomain = `${urlObj.protocol}//${urlObj.hostname}/`;
     
@@ -268,12 +275,16 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
     
     let finalLinksUrl = null;
     const redirectUrlMatch = redirectHtml.match(/url\s*=\s*['"]([^'"]+)['"]/i);
+    
     if (redirectUrlMatch) {
         finalLinksUrl = redirectUrlMatch[1];
     } else {
         const metaRefresh = redirectHtml.match(/<meta[^>]+url=['"]?([^'">]+)['"]?/i);
-        if (metaRefresh) finalLinksUrl = metaRefresh[1];
-        else if (redirectHtml.includes('class="btn') || redirectHtml.includes('id="size"')) finalLinksUrl = hubCloudUrl;
+        if (metaRefresh) {
+            finalLinksUrl = metaRefresh[1];
+        } else if (redirectHtml.includes('class="btn') || redirectHtml.includes('id="size"')) {
+            finalLinksUrl = hubCloudUrl;
+        }
     }
 
     if (!finalLinksUrl) return [];
@@ -285,65 +296,10 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
     }
     
     const $ = cheerio2.load(linksHtml);
-    const sizeText = $("#size").text();
-    const titleText = $("title").text().trim();
+    const results = [];
     const currentMeta = __spreadProps(__spreadValues({}, baseMeta), {
-      bytes: parseBytes(sizeText) || baseMeta.bytes,
-      title: titleText || baseMeta.title
-    });
-
-    // Helper function to resolve gateway links directly to MKV/MP4 stream URLs
-    const resolveRawStreamLink = (targetUrl) => __async(this, null, function* () {
-        let finalStreamUrl = targetUrl;
-        try {
-            const redirectRes = yield fetch(targetUrl, {
-                method: 'HEAD',
-                redirect: 'manual',
-                headers: { "Referer": rootDomain, "User-Agent": USER_AGENT, "Cookie": "xla=s4t;" }
-            });
-            if (redirectRes.status >= 300 && redirectRes.status < 400 && redirectRes.headers.has('location')) {
-                finalStreamUrl = redirectRes.headers.get('location');
-            } else if (redirectRes.url && redirectRes.url !== targetUrl) {
-                finalStreamUrl = redirectRes.url;
-            }
-        } catch (err) {}
-        return finalStreamUrl;
-    });
-
-    const linkExtractionPromises = [];
-
-    // Parse the A-tags, looking for Stream Buttons
-    $("a").each((_, el) => {
-      const text = $(el).text().toLowerCase();
-      let href = $(el).attr("href");
-      if (!href || href === "#" || href.includes("javascript:")) return;
-
-      if (text.includes("fsl") || text.includes("download file") || text.includes("direct download") || text.includes("instant") || text.includes("10gbps")) {
-        
-        // Emulate the page's hidden client-side javascript bypass for FSL
-        if (text.includes("fsl") || $(el).attr("id") === "fsl") {
-            href += "1" + new Date().getMinutes();
-        }
-
-        linkExtractionPromises.push(__async(this, null, function* () {
-            const resolvedStreamUrl = yield resolveRawStreamLink(href);
-            return {
-                source: text.includes("10gbps") ? "10Gbps Server" : "FSL Server",
-                url: resolvedStreamUrl, // The .mkv string
-                meta: currentMeta,
-                requiresProxy: true,
-                proxyHost: rootDomain
-            };
-        }));
-      } else if (text.includes("pixelserver") || text.includes("pixel")) {
-        const pixelUrl = href.replace("/u/", "/api/file/");
-        linkExtractionPromises.push(Promise.resolve({
-          source: "PixelServer",
-          url: pixelUrl,
-          meta: currentMeta,
-          requiresProxy: false
-        }));
-      }
+      bytes: parseBytes($("#size").text()) || baseMeta.bytes,
+      title: $("title").text().trim() || baseMeta.title
     });
 
     let directDownloadBtn = $("#download").attr("href");
@@ -353,23 +309,55 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
     }
 
     if (directDownloadBtn && (directDownloadBtn.includes("hubrouting") || directDownloadBtn.includes("gpdl") || directDownloadBtn.includes("hubcdn"))) {
-        linkExtractionPromises.push(__async(this, null, function* () {
-            const resolvedStreamUrl = yield resolveRawStreamLink(directDownloadBtn);
-            return {
-                source: directDownloadBtn.includes("gpdl") ? "GPDL Stream" : "HubCloud Stream",
-                url: resolvedStreamUrl,
-                meta: currentMeta,
-                requiresProxy: true,
-                proxyHost: rootDomain
-            };
-        }));
+      
+      let finalStreamUrl = directDownloadBtn;
+
+      // === NUVIO FIX: Aggressively follow the PHP redirect to grab the exact .mkv / .mp4 URL ===
+      try {
+        const routingRes = yield fetch(directDownloadBtn, {
+            headers: { "Referer": rootDomain, "User-Agent": USER_AGENT, "Cookie": "xla=s4t;" }
+        });
+
+        // 1. Check if the browser/polyfill auto-followed the redirect to the final file
+        if (routingRes.url && !routingRes.url.includes("hubrouting") && !routingRes.url.includes(".php")) {
+            finalStreamUrl = routingRes.url;
+        } else {
+            // 2. If it returned HTML instead of auto-following, scrape the HTML for the final location
+            const routingText = yield routingRes.text();
+            const locationMatch = routingText.match(/(?:window\.location\.href|url)\s*=\s*['"]([^'"]+)['"]/i) || routingText.match(/<meta[^>]+url=['"]?([^'">]+)['"]?/i);
+            
+            if (locationMatch && locationMatch[1].startsWith('http')) {
+                finalStreamUrl = locationMatch[1];
+            }
+        }
+      } catch (err) {
+        console.log(`[4KHDHub] Failed to bypass routing link: ${err.message}`);
+      }
+
+      results.push({
+        source: "Direct", // Renamed to Direct to match Nuvio UI cleanly
+        url: finalStreamUrl, 
+        meta: currentMeta,
+        isResolved: true // Flag to tell the builder we don't need proxy headers anymore
+      });
     }
 
-    // Wait for all redirect handlers to finish finding the actual media files
-    const finalResults = yield Promise.all(linkExtractionPromises);
-    
-    // Filter out any broken extractions
-    return finalResults.filter(r => r && r.url);
+    $("a").each((_, el) => {
+      const text = $(el).text().toLowerCase();
+      const href = $(el).attr("href");
+      if (!href || href === "#" || href.includes("javascript:")) return;
+
+      if (text.includes("fsl") || text.includes("10gbps")) {
+        results.push({
+          source: text.includes("10gbps") ? "10Gbps" : "FSL",
+          url: href,
+          meta: currentMeta,
+          isResolved: true
+        });
+      }
+    });
+
+    return results;
   });
 }
 
@@ -379,10 +367,9 @@ function getStreams(tmdbId, type, season, episode) {
   return __async(this, null, function* () {
     const tmdbDetails = yield getTmdbDetails(tmdbId, type);
     if (!tmdbDetails) return [];
-    const { title, year } = tmdbDetails;
     
     const isSeries = type === "series" || type === "tv";
-    const pageUrl = yield fetchPageUrl(title, year, isSeries);
+    const pageUrl = yield fetchPageUrl(tmdbDetails.title, tmdbDetails.year, isSeries);
     if (!pageUrl) return [];
     
     const html = yield fetchText(pageUrl);
@@ -396,7 +383,9 @@ function getStreams(tmdbId, type, season, episode) {
       const episodeStr = "Episode-" + String(episode).padStart(2, "0");
       $(".episode-item").each((_, el) => {
         if ($(".episode-title", el).text().includes(seasonStr)) {
-          $(".episode-download-item", el).filter((_2, item) => $(item).text().includes(episodeStr)).each((_2, item) => itemsToProcess.push(item));
+          $(".episode-download-item", el).filter((_2, item) => $(item).text().includes(episodeStr)).each((_2, item) => {
+            itemsToProcess.push(item);
+          });
         }
       });
     } else {
@@ -415,13 +404,18 @@ function getStreams(tmdbId, type, season, episode) {
               title: `${link.meta.title}\n${formatBytes(link.meta.bytes || 0)}`,
               url: link.url,
               quality: sourceResult.meta.height ? `${sourceResult.meta.height}p` : undefined,
-              behaviorHints: { bingeGroup: `4khdhub-${link.source}` }
+              behaviorHints: {
+                bingeGroup: `4khdhub-${link.source}`
+              }
             };
 
-            if (link.requiresProxy) {
+            // If it hasn't been deeply resolved, fallback to proxy headers (Nuvio players hate this, so we prefer the resolve bypass above)
+            if (!link.isResolved) {
               stream.behaviorHints.notWebReady = true;
               stream.behaviorHints.proxyHeaders = {
-                request: { "Referer": link.proxyHost, "User-Agent": USER_AGENT, "Cookie": "xla=s4t;" }
+                request: {
+                  "User-Agent": USER_AGENT
+                }
               };
             }
             return stream;
