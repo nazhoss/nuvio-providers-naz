@@ -1,6 +1,6 @@
 /**
  * 4KHDHub - Built from src/4KHDHub/
- * Final Polish: Updated User-Agent for Mobile/Desktop compatibility
+ * Final Polish: Fixed TMDB Language parsing, Pixeldrain Referer 403s, and User-Agents
  */
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -78,9 +78,9 @@ var DOMAINS_URL = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/
 var TMDB_API_KEY = "439c478a771f35c05022f9feabcca01c";
 var DEFAULT_MAIN_URL = "https://4khdhub.dad";
 
-// AMENDED: Modernized User-Agent and headers to prevent mobile blocking
+// AMENDED: Bumped to Chrome 134 to bypass updated Cloudflare checks
 var HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9",
   "Connection": "keep-alive",
@@ -148,7 +148,10 @@ function getTmdbTitle(tmdbId, mediaType) {
         return (text || "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#039;/g, "'");
       };
       const type = mediaType === "movie" ? "movie" : "tv";
-      const url = `https://www.themoviedb.org/${type}/${tmdbId}?language=tr-TR`;
+      
+      // FIX: Changed language=tr-TR to en-US. Searching 4KHDHub with Turkish titles breaks the scraper.
+      const url = `https://www.themoviedb.org/${type}/${tmdbId}?language=en-US`;
+      
       const response = yield fetch(url, {
         headers: HEADERS
       });
@@ -163,15 +166,15 @@ function getTmdbTitle(tmdbId, mediaType) {
       } else {
         const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
         if (titleMatch) {
-          title = decodeHtml(titleMatch[1]).split("(")[0].split("\u2014")[0].split("\xE2\u20AC\u201D")[0].trim();
+          title = decodeHtml(titleMatch[1]).split("(")[0].split("—")[0].split("–")[0].trim();
         }
       }
       const $ = import_cheerio_without_node_native.default.load(html);
       let origTitle = title;
       $("section.facts p").each((_, el) => {
         const text = $(el).text();
-        if (text.includes("Orijinal Ba\u015Fl\u0131k") || text.includes("Original Title")) {
-          const found = text.replace("Orijinal Ba\u015Fl\u0131k", "").replace("Original Title", "").trim();
+        if (text.includes("Orijinal Başlık") || text.includes("Original Title")) {
+          const found = text.replace("Orijinal Başlık", "").replace("Original Title", "").trim();
           if (found)
             origTitle = decodeHtml(found);
         }
@@ -179,7 +182,7 @@ function getTmdbTitle(tmdbId, mediaType) {
       if (origTitle === title) {
         const origMatch = html.match(/<h3 class="caption" dir="auto">([^<]+)<\/h3>/i) || html.match(/<strong class="original_title">([^<]+)<\/strong>/i);
         if (origMatch) {
-          const matched = decodeHtml(origMatch[1]).replace("Orijinal Adi", "").replace("Orijinal Ad\u0131", "").trim();
+          const matched = decodeHtml(origMatch[1]).replace("Orijinal Adi", "").replace("Orijinal Adı", "").trim();
           if (matched)
             origTitle = matched;
         }
@@ -428,7 +431,8 @@ function resolveHubcloud(url, sourceTitle, referer, quality) {
     if (!/hubcloud\.php/i.test(url)) {
       const html2 = yield fetchText(url, { headers: baseHeaders });
       const $2 = import_cheerio_without_node_native2.default.load(html2);
-      const raw = $2("#download").attr("href");
+      // FIX: Added fallbacks in case the button ID changes
+      const raw = $2("#download").attr("href") || $2(".btn-success").attr("href") || $2("a[href*='hubcloud']").attr("href");
       if (!raw) return [];
       entryUrl = fixUrl(raw, url);
     }
@@ -453,7 +457,10 @@ function resolveHubcloud(url, sourceTitle, referer, quality) {
                        ? (link.split('/').pop() ? `${new URL(link).origin}/api/file/${link.split('/').pop()}?download` : link) 
                        : link;
 
-      streams.push(buildStream(subSource, finalUrl, foundQuality, { Referer: entryUrl }, size, tech));
+      // FIX: Pixeldrain rejects external referers with a 403. Strip the header if it's Pixeldrain.
+      const streamHeaders = text.includes("pixel") ? {} : { Referer: entryUrl };
+
+      streams.push(buildStream(subSource, finalUrl, foundQuality, streamHeaders, size, tech));
     });
     return streams;
   });
@@ -478,7 +485,8 @@ function resolveLink(rawUrl, sourceTitle, referer = "", quality = "Auto") {
       if (lower.includes("pixeldrain")) {
         const pdId = url.split('/').pop();
         const pdUrl = `https://pixeldrain.com/api/file/${pdId}?download`;
-        return [buildStream(`${sourceTitle} - Pixeldrain`, pdUrl, quality, referer ? { Referer: referer } : {})];
+        // FIX: Ensure no referer is passed to Pixeldrain direct links to avoid 403 errors
+        return [buildStream(`${sourceTitle} - Pixeldrain`, pdUrl, quality, {})];
       }
     } catch (error) {}
     return [];
