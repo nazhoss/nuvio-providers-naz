@@ -1,6 +1,6 @@
 /**
  * 4KHDHub - Built from src/4KHDHub/
- * Final Polish: Precision DOM Parsing based on live HTML structure
+ * Final Polish: Hybrid Layout Extractor (Supports both New Accordions & Legacy Flat Layouts)
  */
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -195,7 +195,7 @@ function tokenizeTitle(value) {
   return (value || "").toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(Boolean);
 }
 
-function calculateMatchScore(query, targetTitle) {
+function calculateMatchScore(query, targetTitle, targetUrl) {
   const qTokens = tokenizeTitle(query);
   const tTokens = tokenizeTitle(targetTitle);
   if (!qTokens.length || !tTokens.length) return 0;
@@ -204,7 +204,24 @@ function calculateMatchScore(query, targetTitle) {
   for (const token of qTokens) {
     if (tTokens.includes(token)) matches++;
   }
-  return matches / qTokens.length; 
+  
+  let baseScore = matches / qTokens.length;
+  
+  // URL Slug checking for extra precision
+  if (targetUrl) {
+      try {
+          const path = new URL(targetUrl).pathname.replace(/-/g, " ");
+          const pTokens = tokenizeTitle(path);
+          let pMatches = 0;
+          for (const token of qTokens) {
+              if (pTokens.includes(token)) pMatches++;
+          }
+          const slugScore = pMatches / qTokens.length;
+          baseScore = Math.max(baseScore, slugScore);
+      } catch (e) {}
+  }
+  
+  return baseScore;
 }
 
 function parseStreamDetails(releaseName, hosterName, urlSize) {
@@ -314,11 +331,14 @@ function searchContent(query, mediaType) {
     const $ = import_cheerio_without_node_native2.default.load(html);
     const results = [];
     
-    // Explicitly target the movie cards based on the provided HTML
-    $(".movie-card").each((_, el) => {
+    // Support both New Grid Cards and Old List Link designs
+    $("a.movie-card, div.card-grid a, div.card-grid-small a, article a").each((_, el) => {
       const href = fixUrl($(el).attr("href"), mainUrl);
-      const title = $(el).find(".movie-card-title").text().trim();
-      if (href && title) {
+      if (!href || href.includes("/category/") || href.includes("/tag/") || href.includes("/page/")) return;
+      
+      const title = $(el).find(".movie-card-title, h2, h3").first().text().trim() || $(el).attr("title") || $(el).text().trim();
+      
+      if (href && title && title.length > 1 && !results.some(r => r.href === href)) {
         results.push({ title, href });
       }
     });
@@ -329,7 +349,7 @@ function searchContent(query, mediaType) {
     let highestScore = 0;
 
     for (const item of results) {
-      const score = calculateMatchScore(query, item.title);
+      const score = calculateMatchScore(query, item.title, item.href);
       if (score === 1.0) return item.href; 
       if (score > highestScore) {
         highestScore = score;
@@ -337,48 +357,61 @@ function searchContent(query, mediaType) {
       }
     }
     
-    return highestScore >= 0.6 ? bestMatch : null;
+    return highestScore >= 0.5 ? bestMatch : null;
   });
+}
+
+function isValidHost(url) {
+    const l = url.toLowerCase();
+    return l.includes("hubdrive") || l.includes("hubcloud") || l.includes("hubcdn") || l.includes("pixeldrain") || l.includes("filepress") || l.includes("id=");
 }
 
 function collectMovieLinks($, pageUrl) {
   const links = [];
   const seenUrls = new Set();
 
-  // Parse based on the specific accordion structure
+  // Sweep 1: Accordion Style / Structured Download Items
   $("div.download-item").each((_, itemEl) => {
-    // 1. Extract the header ID to find the content pane
     const headerEl = $(itemEl).find(".download-header");
     const dataFileId = headerEl.attr("data-file-id");
     
-    // 2. Find the content pane
-    const contentPane = $(itemEl).find(`#content-${dataFileId}`);
-    if (!contentPane.length) return;
-
-    // 3. Extract the clean release name (e.g. Batman Begins (2005) 2160p UHD BluRay...)
-    const releaseName = contentPane.find(".file-title").text().trim() || headerEl.text().trim();
-
-    // 4. Extract size from badges if possible
+    let contentPane = null;
+    let releaseName = "";
     let size = "";
-    headerEl.find(".badge").each((i, badge) => {
-        const text = $(badge).text().trim();
-        if (text.includes("GB") || text.includes("MB")) size = text;
-    });
 
-    // 5. Hunt for actual link URLs within the content pane
-    contentPane.find("a[href]").each((_, linkEl) => {
-        let href = fixUrl($(linkEl).attr("href"), pageUrl);
-        if (!href) return;
-        
-        const lowerHref = href.toLowerCase();
-        // Verify it is a valid hosting deep link
-        if (lowerHref.includes("hubdrive") || lowerHref.includes("hubcloud") || lowerHref.includes("hubcdn") || lowerHref.includes("pixeldrain")) {
-            if (!seenUrls.has(href)) {
-               seenUrls.add(href);
-               links.push({ url: href, releaseName: releaseName, size: size });
-            }
-        }
-    });
+    if (dataFileId) {
+      // It's an accordion (New Layout)
+      contentPane = $(itemEl).find(`#content-${dataFileId}`);
+      releaseName = contentPane.find(".file-title").text().trim() || headerEl.text().trim();
+      headerEl.find(".badge").each((i, badge) => {
+          const text = $(badge).text().trim();
+          if (text.includes("GB") || text.includes("MB")) size = text;
+      });
+    } else {
+      // It's a flat container (Legacy Layout)
+      contentPane = $(itemEl);
+      releaseName = $(itemEl).find("div.flex-1, h3, h4").first().text().trim() || $(itemEl).text().trim();
+    }
+
+    if (contentPane && contentPane.length) {
+      contentPane.find("a[href]").each((_, linkEl) => {
+          let href = fixUrl($(linkEl).attr("href"), pageUrl);
+          if (href && isValidHost(href) && !seenUrls.has(href)) {
+             seenUrls.add(href);
+             links.push({ url: href, releaseName: releaseName, size: size });
+          }
+      });
+    }
+  });
+
+  // Sweep 2: Catch-all Fallback (For very old pages with generic buttons)
+  $("a.btn, a[class*='btn-']").each((_, el) => {
+     let href = fixUrl($(el).attr("href"), pageUrl);
+     if (href && isValidHost(href) && !seenUrls.has(href)) {
+        seenUrls.add(href);
+        let releaseName = $(el).parent().text().trim() || $(el).text().trim();
+        links.push({ url: href, releaseName: releaseName, size: "" });
+     }
   });
 
   return links;
@@ -388,43 +421,71 @@ function collectEpisodeLinks($, pageUrl, season, episode) {
     const links = [];
     const seenUrls = new Set();
     
-    // Fallback parsing for episodes (TV series structure)
+    const sPattern = new RegExp(`S0?${season}\\b`, 'i');
+    const ePattern = new RegExp(`E0?${episode}\\b`, 'i');
+    const packPattern = new RegExp(`S0?${season}\\b.*(Pack|Complete|Season)`, 'i');
+    
+    const checkMatch = (text) => {
+        if (sPattern.test(text) && ePattern.test(text)) return true;
+        if (packPattern.test(text)) return true;
+        return false;
+    };
+
+    // Strategy 1: Explicit TV layout
+    $("div.episodes-list div.season-item").each((_, seasonEl) => {
+        const seasonText = $(seasonEl).find("div.episode-number").first().text();
+        const seasonMatch = seasonText.match(/S?([1-9][0-9]*)/i);
+        if (!seasonMatch || parseInt(seasonMatch[1], 10) !== Number(season)) return;
+        
+        $(seasonEl).find("div.episode-download-item").each((__, episodeEl) => {
+          const episodeText = $(episodeEl).find("div.episode-file-info span.badge-psa").text();
+          const episodeMatch = episodeText.match(/Episode-?0*([1-9][0-9]*)/i);
+          if (!episodeMatch || parseInt(episodeMatch[1], 10) !== Number(episode)) return;
+          
+          const headerText = $(episodeEl).find("div.episode-file-info").text().trim();
+          $(episodeEl).find("a[href]").each((___, linkEl) => {
+            const href = fixUrl($(linkEl).attr("href"), pageUrl);
+            if (href && isValidHost(href) && !seenUrls.has(href)) {
+                seenUrls.add(href);
+                links.push({ url: href, releaseName: headerText, size: "" });
+            }
+          });
+        });
+    });
+
+    // Strategy 2: Pack layout or flat episode listings
     $("div.download-item").each((_, itemEl) => {
       const headerEl = $(itemEl).find(".download-header");
       const dataFileId = headerEl.attr("data-file-id");
-      const contentPane = $(itemEl).find(`#content-${dataFileId}`);
-      if (!contentPane.length) return;
-  
-      const releaseName = contentPane.find(".file-title").text().trim() || headerEl.text().trim();
       
-      // Verify season/episode match
-      const sPattern = new RegExp(`S0?${season}\\b`, 'i');
-      const ePattern = new RegExp(`E0?${episode}\\b`, 'i');
-      const packPattern = new RegExp(`S0?${season}\\b.*(Pack|Complete|Season)`, 'i');
-      
-      let isMatch = false;
-      if (sPattern.test(releaseName) && ePattern.test(releaseName)) isMatch = true;
-      else if (packPattern.test(releaseName)) isMatch = true;
-  
-      if (!isMatch) return;
-  
+      let contentPane = null;
+      let releaseName = "";
       let size = "";
-      headerEl.find(".badge").each((i, badge) => {
-          const text = $(badge).text().trim();
-          if (text.includes("GB") || text.includes("MB")) size = text;
-      });
-  
-      contentPane.find("a[href]").each((_, linkEl) => {
-          let href = fixUrl($(linkEl).attr("href"), pageUrl);
-          if (!href) return;
-          const lowerHref = href.toLowerCase();
-          if (lowerHref.includes("hubdrive") || lowerHref.includes("hubcloud") || lowerHref.includes("hubcdn") || lowerHref.includes("pixeldrain")) {
-              if (!seenUrls.has(href)) {
-                 seenUrls.add(href);
-                 links.push({ url: href, releaseName: releaseName, size: size });
-              }
-          }
-      });
+
+      if (dataFileId) {
+        contentPane = $(itemEl).find(`#content-${dataFileId}`);
+        releaseName = contentPane.find(".file-title").text().trim() || headerEl.text().trim();
+        headerEl.find(".badge").each((i, badge) => {
+            const text = $(badge).text().trim();
+            if (text.includes("GB") || text.includes("MB")) size = text;
+        });
+      } else {
+        contentPane = $(itemEl);
+        releaseName = $(itemEl).find("div.flex-1, h3, h4").first().text().trim() || $(itemEl).text().trim();
+      }
+
+      // Only add if it matches the Season/Episode requested
+      if (!checkMatch(releaseName)) return;
+
+      if (contentPane && contentPane.length) {
+        contentPane.find("a[href]").each((_, linkEl) => {
+            let href = fixUrl($(linkEl).attr("href"), pageUrl);
+            if (href && isValidHost(href) && !seenUrls.has(href)) {
+               seenUrls.add(href);
+               links.push({ url: href, releaseName: releaseName, size: size });
+            }
+        });
+      }
     });
   
     return links;
@@ -445,7 +506,7 @@ function resolveHubdrive(url, releaseName, size) {
   return __async(this, null, function* () {
     const html = yield fetchText(url);
     const $ = import_cheerio_without_node_native2.default.load(html);
-    const href = $("a.btn.btn-primary.btn-user.btn-success1.m-1").attr("href");
+    const href = $("a.btn-success1").attr("href") || $("a[href*='hubcloud']").attr("href") || $("a.btn").attr("href");
     if (!href) return [];
     return yield resolveLink(fixUrl(href, url), releaseName, url, size);
   });
@@ -478,7 +539,7 @@ function resolveHubcloud(url, releaseName, referer, size) {
       let hosterName = "HubCloud";
       if (btnText.includes("buzzserver") || link.includes("buzzserver")) hosterName = "BuzzServer";
       else if (btnText.includes("pixel") || link.includes("pixeldrain")) hosterName = "Pixeldrain";
-      else if (btnText.includes("filepress")) hosterName = "FilePress";
+      else if (btnText.includes("filepress") || link.includes("filepress")) hosterName = "FilePress";
 
       const finalUrl = (hosterName === "Pixeldrain" && !link.includes("/api/file/")) 
                        ? (link.split('/').pop() ? `${new URL(link).origin}/api/file/${link.split('/').pop()}?download` : link) 
@@ -540,7 +601,6 @@ function extractStreams(tmdbId, mediaType, season, episode) {
     const allStreams = [];
     const resolvedUrls = new Set();
 
-    // Use Promise.all to fetch links in parallel for faster loading
     const promises = links.map(linkItem => resolveLink(linkItem.url, linkItem.releaseName, contentUrl, linkItem.size));
     const resolvedArrays = yield Promise.all(promises);
 
