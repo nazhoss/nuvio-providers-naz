@@ -1,6 +1,6 @@
 /**
  * 4KHDHub - Built from src/4KHDHub/
- * Final Polish: Tokenized Search Optimization & Rich Multi-Line Stream Metadata
+ * Final Polish: CSS-Agnostic Scraper (Immune to layout changes), Domain Updates
  */
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -76,7 +76,8 @@ var import_cheerio_without_node_native2 = __toESM(require("cheerio-without-node-
 // src/4KHDHub/http.js
 var DOMAINS_URL = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/domains.json";
 var TMDB_API_KEY = "439c478a771f35c05022f9feabcca01c";
-var DEFAULT_MAIN_URL = "https://4khdhub.dad";
+// AMENDED: Default to .click to fix broken dad domains
+var DEFAULT_MAIN_URL = "https://4khdhub.click";
 
 var HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
@@ -166,11 +167,19 @@ var REDIRECT_REGEX = /s\('o','([A-Za-z0-9+/=]+)'|ck\('_wp_http_\d+','([^']+)'/g;
 function dedupeStreams(streams) {
   const seenFingerprints = new Set();
   return streams.filter((stream) => {
-    // Dedupe based on URL and Quality to avoid filtering out identical hosts with different files
     const fingerprint = `${stream.url}|${stream.name}`.toLowerCase().replace(/\s/g, "");
     if (seenFingerprints.has(fingerprint)) return false;
     seenFingerprints.add(fingerprint);
     return true;
+  });
+}
+
+function sortStreams(streams) {
+  const qualityWeights = { "2160p": 5, "1080p": 4, "720p": 3, "480p": 2, "Auto": 1 };
+  return streams.sort((a, b) => {
+    const weightA = qualityWeights[a.quality] || 0;
+    const weightB = qualityWeights[b.quality] || 0;
+    return weightB - weightA;
   });
 }
 
@@ -184,45 +193,47 @@ function decodeBase64(value) {
   try { return atob(value); } catch (_) { return ""; }
 }
 
-// ENHANCEMENT: Advanced Tokenized Search Logic
 function tokenizeTitle(value) {
   return (value || "").toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(Boolean);
 }
 
-function calculateMatchScore(query, targetTitle) {
+function calculateMatchScore(query, targetTitle, targetUrl) {
   const qTokens = tokenizeTitle(query);
   const tTokens = tokenizeTitle(targetTitle);
-  if (!qTokens.length || !tTokens.length) return 0;
+  if (!qTokens.length) return 0;
   
+  // Extract words from the URL slug (e.g., batman-begins-movie-49) to boost score
+  let slugTokens = [];
+  try {
+     const path = new URL(targetUrl).pathname;
+     slugTokens = tokenizeTitle(path.replace(/-/g, " ").replace(/\//g, " "));
+  } catch(e) {}
+
   let matches = 0;
   for (const token of qTokens) {
-    if (tTokens.includes(token)) matches++;
+    if (tTokens.includes(token) || slugTokens.includes(token)) matches++;
   }
-  return matches / qTokens.length; // Percentage of query words found in target
+  
+  return matches / qTokens.length; 
 }
 
-// ENHANCEMENT: Rich Metadata Extraction
 function parseStreamDetails(releaseName, hosterName, urlSize) {
   const lower = (releaseName || "").toLowerCase();
   
-  // 1. Quality Extraction
   let quality = "Auto";
   const heightMatch = lower.match(/(2160|1080|720|480)p/);
   if (heightMatch) quality = heightMatch[0];
   else if (/4k|uhd/.test(lower)) quality = "2160p";
 
-  // 2. Codec Extraction
   let codec = "";
   if (/hevc|h\.?265|x\.?265/.test(lower)) codec = "HEVC";
   else if (/h\.?264|x\.?264|avc/.test(lower)) codec = "H264";
 
-  // 3. Video Tech (HDR/DV/10bit)
   let videoTech = [];
   if (/(hdr10\+|hdr10|hdr)/.test(lower)) videoTech.push("HDR");
   if (/(dv|dolby.?vision)/.test(lower)) videoTech.push("DV");
   if (/10.?bit/.test(lower)) videoTech.push("10bit");
 
-  // 4. Source / Rip Type
   let source = "";
   if (/bluray|bdrip|brrip/.test(lower)) source = "BluRay";
   else if (/web-?dl|web-?rip/.test(lower)) source = "WEB";
@@ -230,7 +241,6 @@ function parseStreamDetails(releaseName, hosterName, urlSize) {
   else if (/hdtv/.test(lower)) source = "HDTV";
   else if (/camrip|telesync|ts/.test(lower)) source = "CAM";
 
-  // 5. Audio Inferencing
   const langs = [];
   if (lower.includes("hindi")) langs.push("HI");
   if (lower.includes("tamil")) langs.push("TA");
@@ -243,7 +253,6 @@ function parseStreamDetails(releaseName, hosterName, urlSize) {
   else if (lower.includes("dual audio") || lower.includes("dual")) audio = "Dual Audio";
   else if (langs.length === 1) audio = langs[0];
 
-  // Compile the Stremio Display Title format
   let line1 = [];
   if (source) line1.push(`🎥 ${source}`);
   if (audio) line1.push(`🔊 ${audio}`);
@@ -273,9 +282,7 @@ function buildStream(releaseName, url, hosterName = "", headers = {}, size = "")
   if (!/\.(m3u8|mp4|mkv)/i.test(finalUrl)) {
     finalUrl += finalUrl.includes("#") ? "" : "#.mkv";
   }
-  
   const meta = parseStreamDetails(releaseName, hosterName, size);
-  
   return {
     name: meta.name,
     title: meta.title,
@@ -317,23 +324,34 @@ function searchContent(query, mediaType) {
     const $ = import_cheerio_without_node_native2.default.load(html);
     const results = [];
     
-    $("div.card-grid a, div.card-grid-small a").each((_, el) => {
+    // AMENDED: CSS-Agnostic search scraper. Finds ALL valid deep links on the page.
+    $("a[href]").each((_, el) => {
       const href = fixUrl($(el).attr("href"), mainUrl);
-      if (!href || href.includes("/category/") || href.includes("/tag/")) return;
-      const title = $(el).find("h3").first().text().trim() || $(el).attr("title") || $(el).find("img").attr("alt") || $(el).text().trim();
-      if (!title) return;
-      results.push({ title, href });
+      if (!href || !href.startsWith(mainUrl)) return;
+      
+      const ignores = ["/category/", "/tag/", "/page/", "/author/", "/contact", "/about", "/dmca"];
+      if (ignores.some(i => href.includes(i))) return;
+      
+      try {
+         const path = new URL(href).pathname;
+         if (path.length < 5 || path === "/") return;
+      } catch(e) { return; }
+
+      let title = $(el).attr("title") || $(el).find("h1, h2, h3, h4, .title, .post-title").first().text().trim() || $(el).find("img").attr("alt") || $(el).text().trim();
+      if (!title || title.length < 2) return;
+
+      if (!results.some(r => r.href === href)) {
+        results.push({ title, href });
+      }
     });
     
     if (!results.length) return null;
 
-    // SCORING LOGIC: Find the best matching title
     let bestMatch = null;
     let highestScore = 0;
 
     for (const item of results) {
-      const score = calculateMatchScore(query, item.title);
-      // Perfect match bypasses everything
+      const score = calculateMatchScore(query, item.title, item.href);
       if (score === 1.0) return item.href; 
       if (score > highestScore) {
         highestScore = score;
@@ -341,27 +359,51 @@ function searchContent(query, mediaType) {
       }
     }
     
-    // Threshold: Only return if at least 60% of the query words matched
     return highestScore >= 0.6 ? bestMatch : null;
   });
 }
 
 function collectMovieLinks($, pageUrl) {
   const links = [];
-  $("div.download-item").each((_, el) => {
-    const anchor = $(el).find("a[href]").first();
+  const seenUrls = new Set();
+
+  // Primary sweep (clean buttons)
+  $("div.download-item, a.btn").each((_, el) => {
+    const anchor = $(el).is('a') ? $(el) : $(el).find("a[href]").first();
     const href = fixUrl(anchor.attr("href"), pageUrl);
     if (!href) return;
-    
-    // Attempt to extract the raw filename for better parsing
     const rawReleaseName = $(el).find("div.flex-1.text-left.font-semibold").text().trim() || $(el).text().trim();
-    links.push({ url: href, releaseName: rawReleaseName });
+    if (!seenUrls.has(href) && (href.includes('hub') || href.includes('pixel') || href.includes('id='))) {
+       seenUrls.add(href);
+       links.push({ url: href, releaseName: rawReleaseName });
+    }
   });
+
+  // Secondary Fallback sweep (CSS-Agnostic)
+  $("a[href]").each((_, el) => {
+    let href = fixUrl($(el).attr("href"), pageUrl);
+    if (!href) return;
+    const lower = href.toLowerCase();
+    
+    const isValid = lower.includes("hubcloud") || lower.includes("hubdrive") || 
+                    lower.includes("hubcdn") || lower.includes("pixeldrain") || 
+                    lower.includes("id=");
+                    
+    if (isValid && !seenUrls.has(href)) {
+       seenUrls.add(href);
+       let text = $(el).text().trim() || $(el).parent().text().trim();
+       links.push({ url: href, releaseName: text });
+    }
+  });
+
   return links;
 }
 
 function collectEpisodeLinks($, pageUrl, season, episode) {
-  const directEpisodeLinks = [];
+  const links = [];
+  const seenUrls = new Set();
+  
+  // Primary structured sweep
   $("div.episodes-list div.season-item").each((_, seasonEl) => {
     const seasonText = $(seasonEl).find("div.episode-number").first().text();
     const seasonMatch = seasonText.match(/S?([1-9][0-9]*)/i);
@@ -373,17 +415,18 @@ function collectEpisodeLinks($, pageUrl, season, episode) {
       if (!episodeMatch || parseInt(episodeMatch[1], 10) !== Number(episode)) return;
       
       const headerText = $(episodeEl).find("div.episode-file-info").text().trim();
-      
       $(episodeEl).find("a[href]").each((___, linkEl) => {
         const href = fixUrl($(linkEl).attr("href"), pageUrl);
         if (!href) return;
-        directEpisodeLinks.push({ url: href, releaseName: headerText });
+        if(!seenUrls.has(href)) {
+            seenUrls.add(href);
+            links.push({ url: href, releaseName: headerText });
+        }
       });
     });
   });
-  if (directEpisodeLinks.length) return directEpisodeLinks;
-  
-  const packLinks = [];
+
+  // Pack sweeps
   $("div.download-item").each((_, item) => {
     const headerText = $(item).find("div.flex-1.text-left.font-semibold").text().trim() || $(item).text().trim();
     const seasonMatch = headerText.match(/S([0-9]+)/i);
@@ -392,10 +435,43 @@ function collectEpisodeLinks($, pageUrl, season, episode) {
     $(item).find("a[href]").each((__, linkEl) => {
       const href = fixUrl($(linkEl).attr("href"), pageUrl);
       if (!href) return;
-      packLinks.push({ url: href, releaseName: headerText });
+      if(!seenUrls.has(href)) {
+          seenUrls.add(href);
+          links.push({ url: href, releaseName: headerText });
+      }
     });
   });
-  return packLinks;
+  
+  if (links.length > 0) return links;
+
+  // Secondary Fallback sweep (CSS-Agnostic Regex Matching)
+  const sPattern = new RegExp(`S0?${season}\\b`, 'i');
+  const ePattern = new RegExp(`E0?${episode}\\b`, 'i');
+  const packPattern = new RegExp(`S0?${season}\\b.*(Pack|Complete|Season)`, 'i');
+  
+  $("a[href]").each((_, el) => {
+    let href = fixUrl($(el).attr("href"), pageUrl);
+    if (!href) return;
+    
+    const lowerHref = href.toLowerCase();
+    const isValidHost = lowerHref.includes("hubcloud") || lowerHref.includes("hubdrive") || lowerHref.includes("hubcdn") || lowerHref.includes("pixeldrain") || lowerHref.includes("id=");
+    
+    if (isValidHost && !seenUrls.has(href)) {
+      let textContext = `${$(el).text()} ${$(el).parent().text()} ${$(el).closest('div, section').prevAll('h2, h3, h4').first().text()}`;
+      
+      let isMatch = false;
+      if (sPattern.test(textContext) && ePattern.test(textContext)) isMatch = true;
+      else if (packPattern.test(textContext)) isMatch = true;
+      else if (sPattern.test(textContext) && !/E\d+/i.test(textContext)) isMatch = true;
+
+      if (isMatch) {
+        seenUrls.add(href);
+        links.push({ url: href, releaseName: textContext.replace(/\s+/g, ' ').trim() });
+      }
+    }
+  });
+  
+  return links;
 }
 
 function resolveHubcdnDirect(url, releaseName) {
@@ -435,7 +511,6 @@ function resolveHubcloud(url, releaseName, referer) {
     const $ = import_cheerio_without_node_native2.default.load(html);
     
     const size = $("i#size").first().text().trim();
-    // Hubcloud page headers contain the purest file details. Use this if available.
     const fileHeader = $("div.card-header").first().text().trim() || releaseName;
     
     const streams = [];
@@ -491,7 +566,6 @@ function extractStreams(tmdbId, mediaType, season, episode) {
     const { trTitle, origTitle, shortTitle } = yield getTmdbTitle(tmdbId, mediaType);
     if (!trTitle && !origTitle) return [];
     
-    // Attempt searching with titles in order of specificity
     let contentUrl = yield searchContent(trTitle, mediaType);
     if (!contentUrl && origTitle && origTitle !== trTitle) contentUrl = yield searchContent(origTitle, mediaType);
     if (!contentUrl && shortTitle) contentUrl = yield searchContent(shortTitle, mediaType);
@@ -521,7 +595,7 @@ function extractStreams(tmdbId, mediaType, season, episode) {
         }
       }
     }
-    return dedupeStreams(allStreams);
+    return sortStreams(dedupeStreams(allStreams));
   });
 }
 
