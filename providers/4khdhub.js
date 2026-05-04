@@ -1,7 +1,7 @@
 /**
  * 4KHDHub - Built from src/4KHDHub/
- * Final Polish: CSS-Agnostic Scraper (Immune to layout changes), Domain Updates
- * Optimized: Concurrent extraction, TMDB API, Native Async/Await
+ * Final Polish: CSS-Agnostic Scraper, Domain Updates
+ * Optimized: Concurrent extraction, TMDB API, Native Async/Await, Advanced UI Formatting
  */
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -204,7 +204,7 @@ function parseStreamDetails(releaseName, hosterName, urlSize) {
 
   let source = "";
   if (/bluray|bdrip|brrip/.test(lower)) source = "BluRay";
-  else if (/web-?dl|web-?rip/.test(lower)) source = "WEB";
+  else if (/web-?dl|web-?rip/.test(lower)) source = "WEB-DL";
   else if (/hdrip/.test(lower)) source = "HDRip";
   else if (/hdtv/.test(lower)) source = "HDTV";
   else if (/camrip|telesync|ts/.test(lower)) source = "CAM";
@@ -221,22 +221,16 @@ function parseStreamDetails(releaseName, hosterName, urlSize) {
   else if (lower.includes("dual audio") || lower.includes("dual")) audio = "Dual Audio";
   else if (langs.length === 1) audio = langs[0];
 
-  let line1 = [];
-  if (source) line1.push(`🎥 ${source}`);
-  if (audio) line1.push(`🔊 ${audio}`);
+  // Modern UI Formatting logic
+  const formatLine = (...items) => items.filter(Boolean).join(' | ');
+  
+  const hostNameDisplay = hosterName || "Direct";
+  const hostIcon = hostNameDisplay === "Direct" ? "🔗" : "☁️";
 
-  let line2 = [];
-  if (urlSize) line2.push(`📦 ${urlSize}`);
-  if (codec) line2.push(`⚙️ ${codec}`);
-  if (videoTech.length > 0) line2.push(`🎯 ${videoTech.join(', ')}`);
+  const line1 = formatLine(`${hostIcon} ${hostNameDisplay}`, source && `🎥 ${source}`, codec && `⚙️ ${codec}`);
+  const line2 = formatLine(urlSize && `📦 ${urlSize}`, audio && `🔊 ${audio}`, videoTech.length && `🎯 ${videoTech.join(', ')}`);
 
-  let line3 = `🔗 ${hosterName || "Direct"}`;
-
-  const finalTitle = [
-    line1.join(' | '),
-    line2.join(' | '),
-    line3
-  ].filter(line => line.trim().length > 0).join('\n');
+  const finalTitle = [line1, line2].filter(Boolean).join('\n');
 
   return {
     name: `${PROVIDER_NAME}\n${quality.toUpperCase()}`,
