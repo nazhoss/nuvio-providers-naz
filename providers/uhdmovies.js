@@ -1,6 +1,6 @@
 /**
  * UHDMovies Provider - Final Polish
- * Fixes: Punctuation Search Bug, Restored ResumeBot/Cloud links, Aggressive Context Matching
+ * Fixes: Flawless Block-Level Text Extraction for heavily nested buttons
  */
 "use strict";
 
@@ -67,40 +67,40 @@ function parseStreamDetails(rawText) {
   return { quality, size, codec, videoTech };
 }
 
-// ============ SEARCH FUNCTIONS ============
+// ============ PROGRESSIVE SEARCH FUNCTIONS ============
 
 async function searchByTitle(title, year) {
   try {
     const domain = await getLatestDomain();
+    const cleanTitle = (title || "").replace(/[:\-]/g, " ").replace(/\s+/g, " ").trim();
+    const queries = [];
     
-    // FIX 1: Strip colons and dashes so WP Search actually works
-    const cleanQueryTitle = title.replace(/[:\-]/g, " ").replace(/\s+/g, " ").trim();
-    const query = encodeURIComponent(cleanQueryTitle);
-    
-    const searchUrl = `${domain}/?s=${query}`;
-    const response = await fetch(searchUrl, { headers: { "User-Agent": USER_AGENT } });
-    const html = await response.text();
-    const $ = cheerio.load(html);
-    const results = [];
+    if (cleanTitle && year) queries.push(`${cleanTitle} ${year}`);
+    if (cleanTitle) queries.push(cleanTitle);
+    if (cleanTitle.includes(" ")) queries.push(cleanTitle.split(" ")[0]);
 
-    $("article.gridlove-post").each((_, el) => {
-      const $el = $(el);
-      const titleRaw = $el.find("h1.sanket, h2.entry-title, .entry-title a").text().trim().replace(/^Download\s+/i, "");
-      const href = $el.find("div.entry-image > a, .entry-title a").attr("href");
+    for (const q of queries) {
+      const searchUrl = `${domain}/?s=${encodeURIComponent(q)}`;
+      const response = await fetch(searchUrl, { headers: { "User-Agent": USER_AGENT } });
+      const html = await response.text();
+      const $ = cheerio.load(html);
+      const results = [];
 
-      if (href && titleRaw) {
-        const cleanTitle = titleRaw.split(/1080p|720p|2160p|4K|Dual Audio/i)[0].replace(/[-|]+$/, "").trim();
-        results.push({ title: cleanTitle, url: href, rawTitle: titleRaw });
-      }
-    });
+      $("article").each((_, el) => {
+        const titleRaw = $(el).find("h1, h2, h3, .entry-title").first().text().trim().replace(/^Download\s+/i, "");
+        const href = $(el).find("a").attr("href");
+        if (href && titleRaw) results.push({ title: titleRaw, url: href, rawTitle: titleRaw });
+      });
 
-    return results;
+      if (results.length > 0) return results;
+    }
+    return [];
   } catch (error) {
     return [];
   }
 }
 
-// ============ BYPASS FUNCTIONS ============
+// ============ SAFELINK BYPASS FUNCTIONS ============
 
 async function bypassHrefli(url) {
   const host = getBaseUrl(url);
@@ -110,13 +110,11 @@ async function bypassHrefli(url) {
     let $ = cheerio.load(html);
 
     for (let i = 0; i < 2; i++) {
-      let formUrl = $("form#landing").attr("action");
+      let formUrl = $("form").attr("action");
       if (!formUrl) break;
-      
       let formData = {};
-      $("form#landing input").each((_, el) => { formData[$(el).attr("name")] = $(el).attr("value") || ""; });
-
-      res = await fetch(formUrl, {
+      $("form input").each((_, el) => { formData[$(el).attr("name")] = $(el).attr("value") || ""; });
+      res = await fetch(formUrl.startsWith('http') ? formUrl : host + formUrl, {
         method: "POST",
         headers: { "User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams(formData).toString()
@@ -127,7 +125,12 @@ async function bypassHrefli(url) {
 
     const script = $("script:contains(?go=)").html() || "";
     const skTokenMatch = script.match(/\?go=([^"]+)/);
-    if (!skTokenMatch) return null;
+    
+    if (!skTokenMatch) {
+        const metaRefresh = $('meta[http-equiv="refresh"]').attr("content") || "";
+        const driveUrlMatch = metaRefresh.match(/url=(.+)/i);
+        return driveUrlMatch ? driveUrlMatch[1] : null;
+    }
 
     const skToken = skTokenMatch[1];
     let wpHttp2 = "";
@@ -169,12 +172,7 @@ async function fetchApiToken(finallink, defaultHost) {
 
     const res = await fetch(`https://${host}/api`, {
       method: "POST",
-      headers: {
-        "User-Agent": USER_AGENT,
-        "Content-Type": "application/x-www-form-urlencoded",
-        "x-token": host,
-        "Referer": finallink
-      },
+      headers: { "User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded", "x-token": host, "Referer": finallink },
       body: `keys=${encodeURIComponent(token)}`
     });
     const text = await res.text();
@@ -246,7 +244,6 @@ async function extractDriveseedPage(url) {
       let link = null;
       let hoster = "Direct";
 
-      // FIX 2: Restored specific video extractors
       if (text.includes("instant download")) {
         link = await fetchApiToken(href, href.includes("video-leech") ? "video-leech.pro" : "video-seed.pro");
         hoster = "Instant";
@@ -283,22 +280,20 @@ async function extractDriveseedPage(url) {
 
 // ============ CSS-AGNOSTIC EXTRACTION ============
 
+// FIX: Smarter Context Extractor
+// Instead of walking up elements randomly, it explicitly looks for the block holding the button, 
+// and then grabs the text from the block immediately preceding it.
 function getContextText($, el) {
-  // FIX 3: Aggressive DOM walker to find the nearest description text
-  let textContext = "";
-  let current = $(el).parent();
-  
-  for (let i = 0; i < 5; i++) {
-    let prev = current.prev();
-    if (prev.length > 0) {
-      textContext = prev.text().trim();
-      if (textContext.length > 5) break;
+    const btnContainer = $(el).closest('p, div, center');
+    let textContainer = btnContainer.prev('p, div, center, h2, h3, h4');
+    
+    // Skip empty lines or separator lines to find the actual text
+    if (textContainer.text().trim().length < 5) {
+        textContainer = textContainer.prev('p, div, center, h2, h3, h4');
     }
-    current = current.parent();
-  }
-  
-  if (!textContext || textContext.length < 5) textContext = $(el).text().trim();
-  return textContext.replace(/Download|From Google Drive|Mega|Direct/ig, "").replace(/\s+/g, " ").trim();
+
+    const combinedText = `${textContainer.text()} ${btnContainer.text()}`;
+    return combinedText.replace(/Download|\(G-Drive\)|From Google Drive|Mega|Direct/ig, "").replace(/\s+/g, " ").trim();
 }
 
 async function getMovieLinks(pageUrl) {
@@ -334,7 +329,6 @@ async function getTvEpisodeLink(pageUrl, targetSeason, targetEpisode) {
     const links = [];
     const seenUrls = new Set();
 
-    // Adjusted Regex to match "S01E05" and "Season 1 Episode 5" equally well
     const sPattern = new RegExp(`(?:Season\\s*|S)0?${targetSeason}\\b`, 'i');
     const ePattern = new RegExp(`(?:Episode\\s*|E)0?${targetEpisode}\\b`, 'i');
     const packPattern = new RegExp(`(?:Season\\s*|S)0?${targetSeason}\\b.*(Pack|Complete|Season)`, 'i');
@@ -375,7 +369,7 @@ async function getTmdbDetails(tmdbId, mediaType) {
   const url = `${TMDB_API}/${isSeries ? "tv" : "movie"}/${tmdbId}?api_key=${TMDB_API_KEY}`;
 
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { headers: { "User-Agent": USER_AGENT }});
     const data = await res.json();
     return isSeries 
       ? { title: data.name, year: data.first_air_date ? parseInt(data.first_air_date.split("-")[0]) : null }
@@ -403,7 +397,8 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         const resolvePromises = links.map(async (linkData) => {
           try {
             let finalLink = linkData.sourceLink;
-            if (finalLink.includes("unblockedgames")) {
+            
+            if (finalLink.includes("unblockedgames") || finalLink.includes("sid=")) {
               const bypassed = await bypassHrefli(finalLink);
               if (bypassed) finalLink = bypassed;
             }
@@ -438,12 +433,12 @@ async function getStreams(tmdbId, mediaType, season, episode) {
               url: finalLink,
               quality: meta.quality
             }];
-          } catch (e) { return []; } // Prevent single bad link from killing batch
+          } catch (e) { return []; } 
         });
 
         const resolvedArrays = await Promise.all(resolvePromises);
         resolvedArrays.forEach(streams => allStreams.push(...streams));
-      } catch (e) {} // Catch internal page errors safely
+      } catch (e) {}
     });
 
     await Promise.all(processPromises);
