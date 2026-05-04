@@ -1,6 +1,6 @@
 /**
- * UHDMovies Provider - Ported from Kotlin CloudStream Extension
- * Optimized: CSS-Agnostic Scraper, Native Async/Await, Advanced UI Formatting
+ * UHDMovies Provider - Final Polish
+ * Fixes: Punctuation Search Bug, Restored ResumeBot/Cloud links, Aggressive Context Matching
  */
 "use strict";
 
@@ -28,7 +28,7 @@ async function getLatestDomain() {
       DOMAIN_CACHE.ts = now;
     }
   } catch (e) {
-    console.warn(`[UHDMovies] Could not fetch domains.json, using fallback: ${DOMAIN_CACHE.url}`);
+    console.warn(`[UHDMovies] domains.json failed, fallback: ${DOMAIN_CACHE.url}`);
   }
   return DOMAIN_CACHE.url;
 }
@@ -44,7 +44,6 @@ function fixUrl(url, domain) {
   return url.startsWith("/") ? `${domain}${url}` : `${domain}/${url}`;
 }
 
-// Parses quality and size from raw text
 function parseStreamDetails(rawText) {
   const lower = (rawText || "").toLowerCase();
   
@@ -73,9 +72,12 @@ function parseStreamDetails(rawText) {
 async function searchByTitle(title, year) {
   try {
     const domain = await getLatestDomain();
-    const query = encodeURIComponent(`${title} ${year || ""}`.trim());
+    
+    // FIX 1: Strip colons and dashes so WP Search actually works
+    const cleanQueryTitle = title.replace(/[:\-]/g, " ").replace(/\s+/g, " ").trim();
+    const query = encodeURIComponent(cleanQueryTitle);
+    
     const searchUrl = `${domain}/?s=${query}`;
-
     const response = await fetch(searchUrl, { headers: { "User-Agent": USER_AGENT } });
     const html = await response.text();
     const $ = cheerio.load(html);
@@ -87,7 +89,6 @@ async function searchByTitle(title, year) {
       const href = $el.find("div.entry-image > a, .entry-title a").attr("href");
 
       if (href && titleRaw) {
-        // Strip out quality tags (1080p, x264, Dual Audio) to get a clean title match
         const cleanTitle = titleRaw.split(/1080p|720p|2160p|4K|Dual Audio/i)[0].replace(/[-|]+$/, "").trim();
         results.push({ title: cleanTitle, url: href, rawTitle: titleRaw });
       }
@@ -95,7 +96,6 @@ async function searchByTitle(title, year) {
 
     return results;
   } catch (error) {
-    console.error(`[UHDMovies] Search failed: ${error.message}`);
     return [];
   }
 }
@@ -109,58 +109,50 @@ async function bypassHrefli(url) {
     let html = await res.text();
     let $ = cheerio.load(html);
 
-    let formUrl = $("form#landing").attr("action");
-    if (!formUrl) return null;
+    for (let i = 0; i < 2; i++) {
+      let formUrl = $("form#landing").attr("action");
+      if (!formUrl) break;
+      
+      let formData = {};
+      $("form#landing input").each((_, el) => { formData[$(el).attr("name")] = $(el).attr("value") || ""; });
 
-    let formData = {};
-    $("form#landing input").each((_, el) => { formData[$(el).attr("name")] = $(el).attr("value") || ""; });
+      res = await fetch(formUrl, {
+        method: "POST",
+        headers: { "User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(formData).toString()
+      });
+      html = await res.text();
+      $ = cheerio.load(html);
+    }
 
-    // Double Form Submission required by WP SafeLink
-    res = await fetch(formUrl, {
-      method: "POST",
-      headers: { "User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams(formData).toString()
-    });
-    html = await res.text();
-    $ = cheerio.load(html);
-    
-    formUrl = $("form#landing").attr("action");
-    formData = {};
-    $("form#landing input").each((_, el) => { formData[$(el).attr("name")] = $(el).attr("value") || ""; });
-
-    res = await fetch(formUrl, {
-      method: "POST",
-      headers: { "User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams(formData).toString()
-    });
-    html = await res.text();
-    
-    $ = cheerio.load(html);
     const script = $("script:contains(?go=)").html() || "";
     const skTokenMatch = script.match(/\?go=([^"]+)/);
     if (!skTokenMatch) return null;
 
     const skToken = skTokenMatch[1];
-    const wpHttp2 = formData["_wp_http2"] || "";
+    let wpHttp2 = "";
+    $("input[name='_wp_http2']").each((_, el) => { wpHttp2 = $(el).attr("value"); });
 
     res = await fetch(`${host}?go=${skToken}`, {
-      headers: { "User-Agent": USER_AGENT, "Cookie": `${skToken}=${wpHttp2}` }
+      headers: { "User-Agent": USER_AGENT, "Cookie": wpHttp2 ? `${skToken}=${wpHttp2}` : "" }
     });
     html = await res.text();
 
     $ = cheerio.load(html);
     const metaRefresh = $('meta[http-equiv="refresh"]').attr("content") || "";
-    const driveUrlMatch = metaRefresh.match(/url=(.+)/);
-    if (!driveUrlMatch) return null;
-
-    const driveUrl = driveUrlMatch[1];
-    res = await fetch(driveUrl, { headers: { "User-Agent": USER_AGENT } });
-    html = await res.text();
-
-    const pathMatch = html.match(/replace\("([^"]+)"\)/);
-    if (!pathMatch || pathMatch[1] === "/404") return null;
-
-    return fixUrl(pathMatch[1], getBaseUrl(driveUrl));
+    const driveUrlMatch = metaRefresh.match(/url=(.+)/i);
+    
+    if (driveUrlMatch) {
+      const driveUrl = driveUrlMatch[1];
+      res = await fetch(driveUrl, { headers: { "User-Agent": USER_AGENT } });
+      html = await res.text();
+      const pathMatch = html.match(/replace\("([^"]+)"\)/);
+      if (pathMatch && pathMatch[1] !== "/404") {
+        return fixUrl(pathMatch[1], getBaseUrl(driveUrl));
+      }
+      return driveUrl;
+    }
+    return null;
   } catch (error) {
     return null;
   }
@@ -188,9 +180,39 @@ async function fetchApiToken(finallink, defaultHost) {
     const text = await res.text();
     const urlMatch = text.match(/url":"([^"]+)"/);
     return urlMatch ? urlMatch[1].replace(/\\\//g, "/") : null;
-  } catch (e) {
-    return null;
-  }
+  } catch (e) { return null; }
+}
+
+async function extractResumeBot(url) {
+  try {
+    const res = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
+    const html = await res.text();
+    const tokenMatch = html.match(/formData\.append\('token',\s*'([a-f0-9]+)'\)/);
+    const pathMatch = html.match(/fetch\('\/download\?id=([a-zA-Z0-9\/+]+)'/);
+    if (!tokenMatch || !pathMatch) return null;
+
+    const token = tokenMatch[1];
+    const path = pathMatch[1];
+    const baseUrl = url.split("/download")[0];
+
+    const postRes = await fetch(`${baseUrl}/download?id=${path}`, {
+      method: "POST",
+      headers: { "User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded", "Origin": baseUrl, "Referer": url },
+      body: `token=${encodeURIComponent(token)}`
+    });
+    const json = JSON.parse(await postRes.text());
+    return json.url && json.url.startsWith("http") ? json.url : null;
+  } catch (e) { return null; }
+}
+
+async function extractResumeCloudLink(baseUrl, path) {
+  try {
+    const res = await fetch(baseUrl + path, { headers: { "User-Agent": USER_AGENT } });
+    const html = await res.text();
+    const $ = cheerio.load(html);
+    const link = $("a.btn-success").first().attr("href");
+    return link && link.startsWith("http") ? link : null;
+  } catch (e) { return null; }
 }
 
 async function extractDriveseedPage(url) {
@@ -213,7 +235,6 @@ async function extractDriveseedPage(url) {
     const meta = parseStreamDetails(rawFileName);
     const finalQuality = meta.quality;
     
-    // UI Formatting for Streams
     const formatLine = (...items) => items.filter(Boolean).join(' | ');
     const line2 = formatLine(meta.size && `📦 ${meta.size}`, meta.codec && `⚙️ ${meta.codec}`, meta.videoTech.length && `🎯 ${meta.videoTech.join(', ')}`);
 
@@ -225,11 +246,18 @@ async function extractDriveseedPage(url) {
       let link = null;
       let hoster = "Direct";
 
+      // FIX 2: Restored specific video extractors
       if (text.includes("instant download")) {
         link = await fetchApiToken(href, href.includes("video-leech") ? "video-leech.pro" : "video-seed.pro");
         hoster = "Instant";
+      } else if (text.includes("resume worker bot")) {
+        link = await extractResumeBot(href);
+        hoster = "ResumeBot";
+      } else if (text.includes("resume cloud")) {
+        link = await extractResumeCloudLink(baseDomain, href);
+        hoster = "ResumeCloud";
       } else if (text.includes("direct links")) {
-        // Direct links usually redirect to a page with actual direct links, bypassing for brevity in Driveseed 
+        link = href; 
         hoster = "CloudFlare";
       } else if (text.includes("cloud download")) {
         link = href;
@@ -255,6 +283,24 @@ async function extractDriveseedPage(url) {
 
 // ============ CSS-AGNOSTIC EXTRACTION ============
 
+function getContextText($, el) {
+  // FIX 3: Aggressive DOM walker to find the nearest description text
+  let textContext = "";
+  let current = $(el).parent();
+  
+  for (let i = 0; i < 5; i++) {
+    let prev = current.prev();
+    if (prev.length > 0) {
+      textContext = prev.text().trim();
+      if (textContext.length > 5) break;
+    }
+    current = current.parent();
+  }
+  
+  if (!textContext || textContext.length < 5) textContext = $(el).text().trim();
+  return textContext.replace(/Download|From Google Drive|Mega|Direct/ig, "").replace(/\s+/g, " ").trim();
+}
+
 async function getMovieLinks(pageUrl) {
   try {
     const res = await fetch(pageUrl, { headers: { "User-Agent": USER_AGENT } });
@@ -263,21 +309,11 @@ async function getMovieLinks(pageUrl) {
     const links = [];
     const seenUrls = new Set();
 
-    // Sweeps ALL valid buttons regardless of brackets, layout, or CSS changes
     $("a.maxbutton-1, a.maxbutton, a[href*='sid='], a[href*='unblockedgames']").each((_, el) => {
       const href = $(el).attr("href");
       if (!href || href.includes("youtube.com") || href.includes("imdb.com")) return;
 
-      // Extract the nearest context text (looking up the DOM tree)
-      let textContext = $(el).closest('p, div, span').prevAll('p, h2, h3').first().text().trim();
-      if (!textContext || textContext.length < 3) {
-        textContext = $(el).parent().prevAll('p, h2, h3').first().text().trim();
-      }
-      if (!textContext || textContext.length < 3) {
-        textContext = $(el).text().trim(); // Fallback to the button's own text
-      }
-
-      textContext = textContext.replace(/Download|From Google Drive|Mega|Direct/ig, "").replace(/\s+/g, " ").trim();
+      const textContext = getContextText($, el);
 
       if (!seenUrls.has(href)) {
         seenUrls.add(href);
@@ -298,18 +334,16 @@ async function getTvEpisodeLink(pageUrl, targetSeason, targetEpisode) {
     const links = [];
     const seenUrls = new Set();
 
-    const sPattern = new RegExp(`S0?${targetSeason}\\b`, 'i');
-    const ePattern = new RegExp(`E0?${targetEpisode}\\b`, 'i');
-    const packPattern = new RegExp(`S0?${targetSeason}\\b.*(Pack|Complete|Season)`, 'i');
+    // Adjusted Regex to match "S01E05" and "Season 1 Episode 5" equally well
+    const sPattern = new RegExp(`(?:Season\\s*|S)0?${targetSeason}\\b`, 'i');
+    const ePattern = new RegExp(`(?:Episode\\s*|E)0?${targetEpisode}\\b`, 'i');
+    const packPattern = new RegExp(`(?:Season\\s*|S)0?${targetSeason}\\b.*(Pack|Complete|Season)`, 'i');
 
     $("a.maxbutton-1, a.maxbutton, a[href*='sid='], a[href*='unblockedgames']").each((_, el) => {
       const href = $(el).attr("href");
       if (!href || href.includes("youtube.com") || href.includes("imdb.com")) return;
 
-      const btnText = $(el).text().trim();
-      const blockText = $(el).closest('p, div').text();
-      const prevBlockText = $(el).closest('p, div, span').prevAll('p, h2, h3, h4').first().text();
-      const fullContext = `${btnText} ${blockText} ${prevBlockText}`.replace(/\s+/g, ' ');
+      const fullContext = getContextText($, el);
 
       let isMatch = false;
       if (sPattern.test(fullContext) && ePattern.test(fullContext)) isMatch = true;
@@ -346,9 +380,7 @@ async function getTmdbDetails(tmdbId, mediaType) {
     return isSeries 
       ? { title: data.name, year: data.first_air_date ? parseInt(data.first_air_date.split("-")[0]) : null }
       : { title: data.title, year: data.release_date ? parseInt(data.release_date.split("-")[0]) : null };
-  } catch (error) {
-    return null;
-  }
+  } catch (error) { return null; }
 }
 
 async function getStreams(tmdbId, mediaType, season, episode) {
@@ -362,65 +394,64 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     const isSeries = mediaType === "series" || mediaType === "tv";
     let allStreams = [];
 
-    // Concurrently process the top search results to extract valid links
     const processPromises = searchResults.map(async (result) => {
-      const links = isSeries 
-        ? await getTvEpisodeLink(result.url, season, episode) 
-        : await getMovieLinks(result.url);
+      try {
+        const links = isSeries 
+          ? await getTvEpisodeLink(result.url, season, episode) 
+          : await getMovieLinks(result.url);
 
-      const resolvePromises = links.map(async (linkData) => {
-        let finalLink = linkData.sourceLink;
-        if (finalLink.includes("unblockedgames")) {
-          const bypassed = await bypassHrefli(finalLink);
-          if (bypassed) finalLink = bypassed;
-        }
+        const resolvePromises = links.map(async (linkData) => {
+          try {
+            let finalLink = linkData.sourceLink;
+            if (finalLink.includes("unblockedgames")) {
+              const bypassed = await bypassHrefli(finalLink);
+              if (bypassed) finalLink = bypassed;
+            }
 
-        if (!finalLink) return [];
+            if (!finalLink) return [];
 
-        if (finalLink.includes("driveseed") || finalLink.includes("driveleech")) {
-          return await extractDriveseedPage(finalLink);
-        }
+            if (finalLink.includes("driveseed") || finalLink.includes("driveleech")) {
+              return await extractDriveseedPage(finalLink);
+            }
 
-        if (finalLink.includes("video-seed")) {
-          const url = await fetchApiToken(finalLink, "video-seed.xyz");
-          if (url) {
+            if (finalLink.includes("video-seed")) {
+              const url = await fetchApiToken(finalLink, "video-seed.xyz");
+              if (url) {
+                const meta = parseStreamDetails(linkData.sourceName);
+                const formatLine = (...items) => items.filter(Boolean).join(' | ');
+                const titleLine = formatLine(meta.size && `📦 ${meta.size}`, meta.codec && `⚙️ ${meta.codec}`, meta.videoTech.length && `🎯 ${meta.videoTech.join(', ')}`);
+                
+                return [{
+                  name: `${PROVIDER_NAME}\n${meta.quality.toUpperCase()}`,
+                  title: titleLine || linkData.sourceName,
+                  url: url,
+                  quality: meta.quality
+                }];
+              }
+              return [];
+            }
+
             const meta = parseStreamDetails(linkData.sourceName);
-            const formatLine = (...items) => items.filter(Boolean).join(' | ');
-            const titleLine = formatLine(meta.size && `📦 ${meta.size}`, meta.codec && `⚙️ ${meta.codec}`, meta.videoTech.length && `🎯 ${meta.videoTech.join(', ')}`);
-            
             return [{
               name: `${PROVIDER_NAME}\n${meta.quality.toUpperCase()}`,
-              title: titleLine || linkData.sourceName,
-              url: url,
+              title: `🔗 External Link | ${linkData.sourceName}`,
+              url: finalLink,
               quality: meta.quality
             }];
-          }
-          return [];
-        }
+          } catch (e) { return []; } // Prevent single bad link from killing batch
+        });
 
-        // Return direct/external links if neither DriveSeed or VideoSeed
-        const meta = parseStreamDetails(linkData.sourceName);
-        return [{
-          name: `${PROVIDER_NAME}\n${meta.quality.toUpperCase()}`,
-          title: `🔗 External Link | ${linkData.sourceName}`,
-          url: finalLink,
-          quality: meta.quality
-        }];
-      });
-
-      const resolvedArrays = await Promise.all(resolvePromises);
-      resolvedArrays.forEach(streams => allStreams.push(...streams));
+        const resolvedArrays = await Promise.all(resolvePromises);
+        resolvedArrays.forEach(streams => allStreams.push(...streams));
+      } catch (e) {} // Catch internal page errors safely
     });
 
     await Promise.all(processPromises);
     
-    // Sort logic to put 2160p at top
     const qualityWeights = { "2160p": 5, "1080p": 4, "720p": 3, "480p": 2, "Auto": 1 };
     return allStreams.sort((a, b) => (qualityWeights[b.quality] || 0) - (qualityWeights[a.quality] || 0));
 
-  } catch (error) {
-    return [];
-  }
+  } catch (error) { return []; }
 }
 
 module.exports = { getStreams };
