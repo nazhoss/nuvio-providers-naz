@@ -1,6 +1,7 @@
 /**
- * 4KHDHub - Final Optimized Build
- * Features: Concurrent extraction, TMDB API, Auto-Domain Updater, Modern UI Formatting
+ * 4KHDHub - Built from src/4KHDHub/
+ * Final Polish: CSS-Agnostic Scraper, Domain Updates
+ * Optimized: Concurrent extraction, TMDB API, Native Async/Await, Advanced UI Formatting
  */
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -85,7 +86,7 @@ async function getDomains() {
 
 async function getMainUrl() {
   const domains = await getDomains();
-  return domains["4khdhub"] || DEFAULT_MAIN_URL;
+  return domains["4khdhub"] || domains.n4khdhub || DEFAULT_MAIN_URL;
 }
 
 function fixUrl(url, baseUrl) {
@@ -106,7 +107,7 @@ async function fetchText(url, options = {}) {
   return await response.text();
 }
 
-// src/4KHDHub/tmdb.js (Optimized using API)
+// src/4KHDHub/tmdb.js (Optimized using API instead of HTML scraping)
 async function getTmdbTitle(tmdbId, mediaType) {
   try {
     const type = mediaType === "movie" ? "movie" : "tv";
@@ -130,7 +131,7 @@ async function getTmdbTitle(tmdbId, mediaType) {
   }
 }
 
-// src/4KHDHub/extractor.js
+// src/4KHDHub/extractor.js (Optimized Logic)
 function dedupeStreams(streams) {
   const seenFingerprints = new Set();
   return streams.filter((stream) => {
@@ -220,6 +221,7 @@ function parseStreamDetails(releaseName, hosterName, urlSize) {
   else if (lower.includes("dual audio") || lower.includes("dual")) audio = "Dual Audio";
   else if (langs.length === 1) audio = langs[0];
 
+  // Modern UI Formatting logic
   const formatLine = (...items) => items.filter(Boolean).join(' | ');
   
   const hostNameDisplay = hosterName || "Direct";
@@ -525,7 +527,7 @@ async function extractStreams(tmdbId, mediaType, season, episode) {
   const allStreams = [];
   const resolvedUrls = new Set();
 
-  // Concurrently resolve all links
+  // Concurrent Execution Strategy
   const resolvePromises = links.map(linkItem => 
       resolveLink(linkItem.url, linkItem.releaseName, contentUrl)
         .catch(() => []) 
