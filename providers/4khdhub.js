@@ -1,6 +1,6 @@
 /**
  * 4KHDHub - Built from src/4KHDHub/
- * Final Polish: Hybrid Layout Extractor (Supports both New Accordions & Legacy Flat Layouts)
+ * Final Polish: Switched to TMDB API & Aggressive Catch-All Link Ripper
  */
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -82,8 +82,7 @@ var HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9",
-  "Connection": "keep-alive",
-  "Upgrade-Insecure-Requests": "1"
+  "Connection": "keep-alive"
 };
 
 var cachedDomains = null;
@@ -129,29 +128,24 @@ function fetchText(_0) {
 }
 
 // src/4KHDHub/tmdb.js
-var import_cheerio_without_node_native = __toESM(require("cheerio-without-node-native"));
-
+// FIX: Using TMDB API directly to guarantee title fetch (Bypasses Cloudflare HTML blocking)
 function getTmdbTitle(tmdbId, mediaType) {
   return __async(this, null, function* () {
     try {
-      let decodeHtml = function(text) {
-        return (text || "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#039;/g, "'");
-      };
       const type = mediaType === "movie" ? "movie" : "tv";
-      const url = `https://www.themoviedb.org/${type}/${tmdbId}?language=en-US`;
-      const response = yield fetch(url, { headers: HEADERS });
-      if (!response.ok) throw new Error(`TMDB HTML fetch error: ${response.status}`);
-      const html = yield response.text();
-      let title = "";
-      const ogMatch = html.match(/<meta property="og:title" content="([^"]+)">/i);
-      if (ogMatch) {
-        title = decodeHtml(ogMatch[1]).split("(")[0].trim();
-      } else {
-        const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
-        if (titleMatch) title = decodeHtml(titleMatch[1]).split("(")[0].split("—")[0].split("–")[0].trim();
-      }
-      return { trTitle: title, origTitle: title, shortTitle: title.split(":")[0].trim() };
+      const url = `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${TMDB_API_KEY}&language=en-US`;
+      
+      const response = yield fetch(url);
+      if (!response.ok) throw new Error("TMDB API failed");
+      
+      const data = yield response.json();
+      const title = data.title || data.name || "";
+      const origTitle = data.original_title || data.original_name || title;
+      const shortTitle = title.includes(":") ? title.split(":")[0].trim() : title;
+      
+      return { trTitle: title, origTitle: origTitle, shortTitle: shortTitle };
     } catch (error) {
+      console.error(`TMDB API Error: ${error.message}`);
       return { trTitle: "", origTitle: "", shortTitle: "" };
     }
   });
@@ -198,7 +192,7 @@ function tokenizeTitle(value) {
 function calculateMatchScore(query, targetTitle, targetUrl) {
   const qTokens = tokenizeTitle(query);
   const tTokens = tokenizeTitle(targetTitle);
-  if (!qTokens.length || !tTokens.length) return 0;
+  if (!qTokens.length) return 0;
   
   let matches = 0;
   for (const token of qTokens) {
@@ -207,7 +201,6 @@ function calculateMatchScore(query, targetTitle, targetUrl) {
   
   let baseScore = matches / qTokens.length;
   
-  // URL Slug checking for extra precision
   if (targetUrl) {
       try {
           const path = new URL(targetUrl).pathname.replace(/-/g, " ");
@@ -216,11 +209,9 @@ function calculateMatchScore(query, targetTitle, targetUrl) {
           for (const token of qTokens) {
               if (pTokens.includes(token)) pMatches++;
           }
-          const slugScore = pMatches / qTokens.length;
-          baseScore = Math.max(baseScore, slugScore);
+          baseScore = Math.max(baseScore, pMatches / qTokens.length);
       } catch (e) {}
   }
-  
   return baseScore;
 }
 
@@ -271,24 +262,17 @@ function parseStreamDetails(releaseName, hosterName, urlSize) {
 
   let line3 = `🔗 ${hosterName || "Direct"}`;
 
-  const finalTitle = [
-    line1.join(' | '),
-    line2.join(' | '),
-    line3
-  ].filter(line => line.trim().length > 0).join('\n');
-
   return {
     name: `${PROVIDER_NAME}\n${quality.toUpperCase()}`,
-    title: finalTitle,
+    title: [line1.join(' | '), line2.join(' | '), line3].filter(line => line.trim().length > 0).join('\n'),
     quality: quality
   };
 }
 
 function buildStream(releaseName, url, hosterName = "", headers = {}, size = "") {
   let finalUrl = url;
-  if (!/\.(m3u8|mp4|mkv)/i.test(finalUrl)) {
-    finalUrl += finalUrl.includes("#") ? "" : "#.mkv";
-  }
+  if (!/\.(m3u8|mp4|mkv)/i.test(finalUrl)) finalUrl += finalUrl.includes("#") ? "" : "#.mkv";
+  
   const meta = parseStreamDetails(releaseName, hosterName, size);
   return {
     name: meta.name,
@@ -305,9 +289,7 @@ function getRedirectLinks(url) {
     try { html = yield fetchText(url); } catch (error) { return ""; }
     let combined = "";
     let match;
-    while ((match = REDIRECT_REGEX.exec(html)) !== null) {
-      combined += match[1] || match[2] || "";
-    }
+    while ((match = REDIRECT_REGEX.exec(html)) !== null) combined += match[1] || match[2] || "";
     if (!combined) return "";
     try {
       const decoded = decodeBase64(rot13(decodeBase64(decodeBase64(combined))));
@@ -331,13 +313,11 @@ function searchContent(query, mediaType) {
     const $ = import_cheerio_without_node_native2.default.load(html);
     const results = [];
     
-    // Support both New Grid Cards and Old List Link designs
     $("a.movie-card, div.card-grid a, div.card-grid-small a, article a").each((_, el) => {
       const href = fixUrl($(el).attr("href"), mainUrl);
       if (!href || href.includes("/category/") || href.includes("/tag/") || href.includes("/page/")) return;
       
       const title = $(el).find(".movie-card-title, h2, h3").first().text().trim() || $(el).attr("title") || $(el).text().trim();
-      
       if (href && title && title.length > 1 && !results.some(r => r.href === href)) {
         results.push({ title, href });
       }
@@ -357,7 +337,8 @@ function searchContent(query, mediaType) {
       }
     }
     
-    return highestScore >= 0.5 ? bestMatch : null;
+    // Lowered threshold to 0.35 to catch movies with subtitle additions
+    return highestScore >= 0.35 ? bestMatch : results[0]?.href || null;
   });
 }
 
@@ -370,47 +351,25 @@ function collectMovieLinks($, pageUrl) {
   const links = [];
   const seenUrls = new Set();
 
-  // Sweep 1: Accordion Style / Structured Download Items
-  $("div.download-item").each((_, itemEl) => {
-    const headerEl = $(itemEl).find(".download-header");
-    const dataFileId = headerEl.attr("data-file-id");
-    
-    let contentPane = null;
-    let releaseName = "";
-    let size = "";
-
-    if (dataFileId) {
-      // It's an accordion (New Layout)
-      contentPane = $(itemEl).find(`#content-${dataFileId}`);
-      releaseName = contentPane.find(".file-title").text().trim() || headerEl.text().trim();
-      headerEl.find(".badge").each((i, badge) => {
-          const text = $(badge).text().trim();
-          if (text.includes("GB") || text.includes("MB")) size = text;
-      });
-    } else {
-      // It's a flat container (Legacy Layout)
-      contentPane = $(itemEl);
-      releaseName = $(itemEl).find("div.flex-1, h3, h4").first().text().trim() || $(itemEl).text().trim();
-    }
-
-    if (contentPane && contentPane.length) {
-      contentPane.find("a[href]").each((_, linkEl) => {
-          let href = fixUrl($(linkEl).attr("href"), pageUrl);
-          if (href && isValidHost(href) && !seenUrls.has(href)) {
-             seenUrls.add(href);
-             links.push({ url: href, releaseName: releaseName, size: size });
-          }
-      });
-    }
-  });
-
-  // Sweep 2: Catch-all Fallback (For very old pages with generic buttons)
-  $("a.btn, a[class*='btn-']").each((_, el) => {
+  // FIX: Aggressively grab EVERY valid hosting link on the page
+  $("a[href]").each((_, el) => {
      let href = fixUrl($(el).attr("href"), pageUrl);
      if (href && isValidHost(href) && !seenUrls.has(href)) {
         seenUrls.add(href);
-        let releaseName = $(el).parent().text().trim() || $(el).text().trim();
-        links.push({ url: href, releaseName: releaseName, size: "" });
+        
+        // Attempt to find the closest descriptive text for the stream
+        let releaseName = $(el).closest('.download-item').find('.file-title').text().trim();
+        if (!releaseName) releaseName = $(el).closest('.download-item').find('.download-header').text().trim();
+        if (!releaseName) releaseName = $(el).parent().text().trim() || $(el).text().trim();
+        
+        // Attempt to extract file size if nearby
+        let size = "";
+        $(el).closest('.download-item').find(".badge").each((i, badge) => {
+            const text = $(badge).text().trim();
+            if (text.includes("GB") || text.includes("MB")) size = text;
+        });
+
+        links.push({ url: href, releaseName: releaseName, size: size });
      }
   });
 
@@ -421,71 +380,41 @@ function collectEpisodeLinks($, pageUrl, season, episode) {
     const links = [];
     const seenUrls = new Set();
     
-    const sPattern = new RegExp(`S0?${season}\\b`, 'i');
-    const ePattern = new RegExp(`E0?${episode}\\b`, 'i');
-    const packPattern = new RegExp(`S0?${season}\\b.*(Pack|Complete|Season)`, 'i');
+    const s = parseInt(season);
+    const e = parseInt(episode);
     
     const checkMatch = (text) => {
-        if (sPattern.test(text) && ePattern.test(text)) return true;
-        if (packPattern.test(text)) return true;
+        const t = text.toLowerCase();
+        if (t.includes(`s${s > 9 ? s : '0'+s}`) && t.includes(`e${e > 9 ? e : '0'+e}`)) return true;
+        if (t.includes(`s${s}`) && t.includes(`e${e}`)) return true;
+        if (t.includes(`season ${s}`) || t.includes(`season 0${s}`)) {
+            if (t.includes(`episode ${e}`) || t.includes(`episode 0${e}`)) return true;
+        }
+        if (t.includes("pack") || t.includes("complete") || t.includes("season")) {
+            if (t.includes(`s${s}`) || t.includes(`season ${s}`)) return true;
+        }
         return false;
     };
 
-    // Strategy 1: Explicit TV layout
-    $("div.episodes-list div.season-item").each((_, seasonEl) => {
-        const seasonText = $(seasonEl).find("div.episode-number").first().text();
-        const seasonMatch = seasonText.match(/S?([1-9][0-9]*)/i);
-        if (!seasonMatch || parseInt(seasonMatch[1], 10) !== Number(season)) return;
-        
-        $(seasonEl).find("div.episode-download-item").each((__, episodeEl) => {
-          const episodeText = $(episodeEl).find("div.episode-file-info span.badge-psa").text();
-          const episodeMatch = episodeText.match(/Episode-?0*([1-9][0-9]*)/i);
-          if (!episodeMatch || parseInt(episodeMatch[1], 10) !== Number(episode)) return;
-          
-          const headerText = $(episodeEl).find("div.episode-file-info").text().trim();
-          $(episodeEl).find("a[href]").each((___, linkEl) => {
-            const href = fixUrl($(linkEl).attr("href"), pageUrl);
-            if (href && isValidHost(href) && !seenUrls.has(href)) {
+    $("a[href]").each((_, el) => {
+        let href = fixUrl($(el).attr("href"), pageUrl);
+        if (href && isValidHost(href) && !seenUrls.has(href)) {
+            
+            let releaseName = $(el).closest('.download-item').find('.file-title').text().trim();
+            if (!releaseName) releaseName = $(el).closest('.download-item').find('.download-header').text().trim();
+            if (!releaseName) releaseName = $(el).closest('.episode-download-item').text().trim();
+            if (!releaseName) releaseName = $(el).parent().text().trim();
+            
+            if (checkMatch(releaseName)) {
                 seenUrls.add(href);
-                links.push({ url: href, releaseName: headerText, size: "" });
+                let size = "";
+                $(el).closest('.download-item').find(".badge").each((i, badge) => {
+                    const text = $(badge).text().trim();
+                    if (text.includes("GB") || text.includes("MB")) size = text;
+                });
+                links.push({ url: href, releaseName: releaseName, size: size });
             }
-          });
-        });
-    });
-
-    // Strategy 2: Pack layout or flat episode listings
-    $("div.download-item").each((_, itemEl) => {
-      const headerEl = $(itemEl).find(".download-header");
-      const dataFileId = headerEl.attr("data-file-id");
-      
-      let contentPane = null;
-      let releaseName = "";
-      let size = "";
-
-      if (dataFileId) {
-        contentPane = $(itemEl).find(`#content-${dataFileId}`);
-        releaseName = contentPane.find(".file-title").text().trim() || headerEl.text().trim();
-        headerEl.find(".badge").each((i, badge) => {
-            const text = $(badge).text().trim();
-            if (text.includes("GB") || text.includes("MB")) size = text;
-        });
-      } else {
-        contentPane = $(itemEl);
-        releaseName = $(itemEl).find("div.flex-1, h3, h4").first().text().trim() || $(itemEl).text().trim();
-      }
-
-      // Only add if it matches the Season/Episode requested
-      if (!checkMatch(releaseName)) return;
-
-      if (contentPane && contentPane.length) {
-        contentPane.find("a[href]").each((_, linkEl) => {
-            let href = fixUrl($(linkEl).attr("href"), pageUrl);
-            if (href && isValidHost(href) && !seenUrls.has(href)) {
-               seenUrls.add(href);
-               links.push({ url: href, releaseName: releaseName, size: size });
-            }
-        });
-      }
+        }
     });
   
     return links;
@@ -506,7 +435,7 @@ function resolveHubdrive(url, releaseName, size) {
   return __async(this, null, function* () {
     const html = yield fetchText(url);
     const $ = import_cheerio_without_node_native2.default.load(html);
-    const href = $("a.btn-success1").attr("href") || $("a[href*='hubcloud']").attr("href") || $("a.btn").attr("href");
+    const href = $("a[href*='hubcloud'], a[href*='pixeldrain'], a.btn").first().attr("href");
     if (!href) return [];
     return yield resolveLink(fixUrl(href, url), releaseName, url, size);
   });
