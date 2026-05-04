@@ -1,6 +1,6 @@
 /**
  * 4KHDHub - Built from src/4KHDHub/
- * Final Polish: CSS-Agnostic Scraper (Immune to layout changes), Domain Updates
+ * Final Polish: Precision DOM Parsing based on live HTML structure
  */
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -76,7 +76,6 @@ var import_cheerio_without_node_native2 = __toESM(require("cheerio-without-node-
 // src/4KHDHub/http.js
 var DOMAINS_URL = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/domains.json";
 var TMDB_API_KEY = "439c478a771f35c05022f9feabcca01c";
-// AMENDED: Default to .click to fix broken dad domains
 var DEFAULT_MAIN_URL = "https://4khdhub.click";
 
 var HEADERS = {
@@ -90,26 +89,25 @@ var HEADERS = {
 var cachedDomains = null;
 function getDomains() {
   return __async(this, null, function* () {
-    if (cachedDomains)
-      return cachedDomains;
+    if (cachedDomains) return cachedDomains;
     try {
       const res = yield fetch(DOMAINS_URL, { headers: HEADERS });
-      if (!res.ok)
-        throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       cachedDomains = yield res.json();
     } catch (error) {
-      console.warn(`[4KHDHub] domains.json could not be fetched: ${error.message}`);
       cachedDomains = {};
     }
     return cachedDomains;
   });
 }
+
 function getMainUrl() {
   return __async(this, null, function* () {
     const domains = yield getDomains();
     return domains["4khdhub"] || domains.n4khdhub || DEFAULT_MAIN_URL;
   });
 }
+
 function fixUrl(url, baseUrl) {
   if (!url) return "";
   if (url.startsWith("http://") || url.startsWith("https://")) return url;
@@ -117,6 +115,7 @@ function fixUrl(url, baseUrl) {
   if (!baseUrl) return url;
   try { return new URL(url, baseUrl).toString(); } catch (_) { return url; }
 }
+
 function fetchText(_0) {
   return __async(this, arguments, function* (url, options = {}) {
     const response = yield fetch(url, __spreadProps(__spreadValues({
@@ -131,6 +130,7 @@ function fetchText(_0) {
 
 // src/4KHDHub/tmdb.js
 var import_cheerio_without_node_native = __toESM(require("cheerio-without-node-native"));
+
 function getTmdbTitle(tmdbId, mediaType) {
   return __async(this, null, function* () {
     try {
@@ -148,13 +148,10 @@ function getTmdbTitle(tmdbId, mediaType) {
         title = decodeHtml(ogMatch[1]).split("(")[0].trim();
       } else {
         const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
-        if (titleMatch) {
-          title = decodeHtml(titleMatch[1]).split("(")[0].split("—")[0].split("–")[0].trim();
-        }
+        if (titleMatch) title = decodeHtml(titleMatch[1]).split("(")[0].split("—")[0].split("–")[0].trim();
       }
       return { trTitle: title, origTitle: title, shortTitle: title.split(":")[0].trim() };
     } catch (error) {
-      console.error(`[4KHDHub] TMDB title error: ${error.message}`);
       return { trTitle: "", origTitle: "", shortTitle: "" };
     }
   });
@@ -189,6 +186,7 @@ function rot13(value) {
     return String.fromCharCode((char.charCodeAt(0) - base + 13) % 26 + base);
   });
 }
+
 function decodeBase64(value) {
   try { return atob(value); } catch (_) { return ""; }
 }
@@ -197,23 +195,15 @@ function tokenizeTitle(value) {
   return (value || "").toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(Boolean);
 }
 
-function calculateMatchScore(query, targetTitle, targetUrl) {
+function calculateMatchScore(query, targetTitle) {
   const qTokens = tokenizeTitle(query);
   const tTokens = tokenizeTitle(targetTitle);
-  if (!qTokens.length) return 0;
+  if (!qTokens.length || !tTokens.length) return 0;
   
-  // Extract words from the URL slug (e.g., batman-begins-movie-49) to boost score
-  let slugTokens = [];
-  try {
-     const path = new URL(targetUrl).pathname;
-     slugTokens = tokenizeTitle(path.replace(/-/g, " ").replace(/\//g, " "));
-  } catch(e) {}
-
   let matches = 0;
   for (const token of qTokens) {
-    if (tTokens.includes(token) || slugTokens.includes(token)) matches++;
+    if (tTokens.includes(token)) matches++;
   }
-  
   return matches / qTokens.length; 
 }
 
@@ -324,23 +314,11 @@ function searchContent(query, mediaType) {
     const $ = import_cheerio_without_node_native2.default.load(html);
     const results = [];
     
-    // AMENDED: CSS-Agnostic search scraper. Finds ALL valid deep links on the page.
-    $("a[href]").each((_, el) => {
+    // Explicitly target the movie cards based on the provided HTML
+    $(".movie-card").each((_, el) => {
       const href = fixUrl($(el).attr("href"), mainUrl);
-      if (!href || !href.startsWith(mainUrl)) return;
-      
-      const ignores = ["/category/", "/tag/", "/page/", "/author/", "/contact", "/about", "/dmca"];
-      if (ignores.some(i => href.includes(i))) return;
-      
-      try {
-         const path = new URL(href).pathname;
-         if (path.length < 5 || path === "/") return;
-      } catch(e) { return; }
-
-      let title = $(el).attr("title") || $(el).find("h1, h2, h3, h4, .title, .post-title").first().text().trim() || $(el).find("img").attr("alt") || $(el).text().trim();
-      if (!title || title.length < 2) return;
-
-      if (!results.some(r => r.href === href)) {
+      const title = $(el).find(".movie-card-title").text().trim();
+      if (href && title) {
         results.push({ title, href });
       }
     });
@@ -351,7 +329,7 @@ function searchContent(query, mediaType) {
     let highestScore = 0;
 
     for (const item of results) {
-      const score = calculateMatchScore(query, item.title, item.href);
+      const score = calculateMatchScore(query, item.title);
       if (score === 1.0) return item.href; 
       if (score > highestScore) {
         highestScore = score;
@@ -367,135 +345,113 @@ function collectMovieLinks($, pageUrl) {
   const links = [];
   const seenUrls = new Set();
 
-  // Primary sweep (clean buttons)
-  $("div.download-item, a.btn").each((_, el) => {
-    const anchor = $(el).is('a') ? $(el) : $(el).find("a[href]").first();
-    const href = fixUrl(anchor.attr("href"), pageUrl);
-    if (!href) return;
-    const rawReleaseName = $(el).find("div.flex-1.text-left.font-semibold").text().trim() || $(el).text().trim();
-    if (!seenUrls.has(href) && (href.includes('hub') || href.includes('pixel') || href.includes('id='))) {
-       seenUrls.add(href);
-       links.push({ url: href, releaseName: rawReleaseName });
-    }
-  });
-
-  // Secondary Fallback sweep (CSS-Agnostic)
-  $("a[href]").each((_, el) => {
-    let href = fixUrl($(el).attr("href"), pageUrl);
-    if (!href) return;
-    const lower = href.toLowerCase();
+  // Parse based on the specific accordion structure
+  $("div.download-item").each((_, itemEl) => {
+    // 1. Extract the header ID to find the content pane
+    const headerEl = $(itemEl).find(".download-header");
+    const dataFileId = headerEl.attr("data-file-id");
     
-    const isValid = lower.includes("hubcloud") || lower.includes("hubdrive") || 
-                    lower.includes("hubcdn") || lower.includes("pixeldrain") || 
-                    lower.includes("id=");
-                    
-    if (isValid && !seenUrls.has(href)) {
-       seenUrls.add(href);
-       let text = $(el).text().trim() || $(el).parent().text().trim();
-       links.push({ url: href, releaseName: text });
-    }
+    // 2. Find the content pane
+    const contentPane = $(itemEl).find(`#content-${dataFileId}`);
+    if (!contentPane.length) return;
+
+    // 3. Extract the clean release name (e.g. Batman Begins (2005) 2160p UHD BluRay...)
+    const releaseName = contentPane.find(".file-title").text().trim() || headerEl.text().trim();
+
+    // 4. Extract size from badges if possible
+    let size = "";
+    headerEl.find(".badge").each((i, badge) => {
+        const text = $(badge).text().trim();
+        if (text.includes("GB") || text.includes("MB")) size = text;
+    });
+
+    // 5. Hunt for actual link URLs within the content pane
+    contentPane.find("a[href]").each((_, linkEl) => {
+        let href = fixUrl($(linkEl).attr("href"), pageUrl);
+        if (!href) return;
+        
+        const lowerHref = href.toLowerCase();
+        // Verify it is a valid hosting deep link
+        if (lowerHref.includes("hubdrive") || lowerHref.includes("hubcloud") || lowerHref.includes("hubcdn") || lowerHref.includes("pixeldrain")) {
+            if (!seenUrls.has(href)) {
+               seenUrls.add(href);
+               links.push({ url: href, releaseName: releaseName, size: size });
+            }
+        }
+    });
   });
 
   return links;
 }
 
 function collectEpisodeLinks($, pageUrl, season, episode) {
-  const links = [];
-  const seenUrls = new Set();
-  
-  // Primary structured sweep
-  $("div.episodes-list div.season-item").each((_, seasonEl) => {
-    const seasonText = $(seasonEl).find("div.episode-number").first().text();
-    const seasonMatch = seasonText.match(/S?([1-9][0-9]*)/i);
-    if (!seasonMatch || parseInt(seasonMatch[1], 10) !== Number(season)) return;
+    const links = [];
+    const seenUrls = new Set();
     
-    $(seasonEl).find("div.episode-download-item").each((__, episodeEl) => {
-      const episodeText = $(episodeEl).find("div.episode-file-info span.badge-psa").text();
-      const episodeMatch = episodeText.match(/Episode-?0*([1-9][0-9]*)/i);
-      if (!episodeMatch || parseInt(episodeMatch[1], 10) !== Number(episode)) return;
+    // Fallback parsing for episodes (TV series structure)
+    $("div.download-item").each((_, itemEl) => {
+      const headerEl = $(itemEl).find(".download-header");
+      const dataFileId = headerEl.attr("data-file-id");
+      const contentPane = $(itemEl).find(`#content-${dataFileId}`);
+      if (!contentPane.length) return;
+  
+      const releaseName = contentPane.find(".file-title").text().trim() || headerEl.text().trim();
       
-      const headerText = $(episodeEl).find("div.episode-file-info").text().trim();
-      $(episodeEl).find("a[href]").each((___, linkEl) => {
-        const href = fixUrl($(linkEl).attr("href"), pageUrl);
-        if (!href) return;
-        if(!seenUrls.has(href)) {
-            seenUrls.add(href);
-            links.push({ url: href, releaseName: headerText });
-        }
-      });
-    });
-  });
-
-  // Pack sweeps
-  $("div.download-item").each((_, item) => {
-    const headerText = $(item).find("div.flex-1.text-left.font-semibold").text().trim() || $(item).text().trim();
-    const seasonMatch = headerText.match(/S([0-9]+)/i);
-    if (!seasonMatch || parseInt(seasonMatch[1], 10) !== Number(season)) return;
-    
-    $(item).find("a[href]").each((__, linkEl) => {
-      const href = fixUrl($(linkEl).attr("href"), pageUrl);
-      if (!href) return;
-      if(!seenUrls.has(href)) {
-          seenUrls.add(href);
-          links.push({ url: href, releaseName: headerText });
-      }
-    });
-  });
-  
-  if (links.length > 0) return links;
-
-  // Secondary Fallback sweep (CSS-Agnostic Regex Matching)
-  const sPattern = new RegExp(`S0?${season}\\b`, 'i');
-  const ePattern = new RegExp(`E0?${episode}\\b`, 'i');
-  const packPattern = new RegExp(`S0?${season}\\b.*(Pack|Complete|Season)`, 'i');
-  
-  $("a[href]").each((_, el) => {
-    let href = fixUrl($(el).attr("href"), pageUrl);
-    if (!href) return;
-    
-    const lowerHref = href.toLowerCase();
-    const isValidHost = lowerHref.includes("hubcloud") || lowerHref.includes("hubdrive") || lowerHref.includes("hubcdn") || lowerHref.includes("pixeldrain") || lowerHref.includes("id=");
-    
-    if (isValidHost && !seenUrls.has(href)) {
-      let textContext = `${$(el).text()} ${$(el).parent().text()} ${$(el).closest('div, section').prevAll('h2, h3, h4').first().text()}`;
+      // Verify season/episode match
+      const sPattern = new RegExp(`S0?${season}\\b`, 'i');
+      const ePattern = new RegExp(`E0?${episode}\\b`, 'i');
+      const packPattern = new RegExp(`S0?${season}\\b.*(Pack|Complete|Season)`, 'i');
       
       let isMatch = false;
-      if (sPattern.test(textContext) && ePattern.test(textContext)) isMatch = true;
-      else if (packPattern.test(textContext)) isMatch = true;
-      else if (sPattern.test(textContext) && !/E\d+/i.test(textContext)) isMatch = true;
-
-      if (isMatch) {
-        seenUrls.add(href);
-        links.push({ url: href, releaseName: textContext.replace(/\s+/g, ' ').trim() });
-      }
-    }
-  });
+      if (sPattern.test(releaseName) && ePattern.test(releaseName)) isMatch = true;
+      else if (packPattern.test(releaseName)) isMatch = true;
   
-  return links;
+      if (!isMatch) return;
+  
+      let size = "";
+      headerEl.find(".badge").each((i, badge) => {
+          const text = $(badge).text().trim();
+          if (text.includes("GB") || text.includes("MB")) size = text;
+      });
+  
+      contentPane.find("a[href]").each((_, linkEl) => {
+          let href = fixUrl($(linkEl).attr("href"), pageUrl);
+          if (!href) return;
+          const lowerHref = href.toLowerCase();
+          if (lowerHref.includes("hubdrive") || lowerHref.includes("hubcloud") || lowerHref.includes("hubcdn") || lowerHref.includes("pixeldrain")) {
+              if (!seenUrls.has(href)) {
+                 seenUrls.add(href);
+                 links.push({ url: href, releaseName: releaseName, size: size });
+              }
+          }
+      });
+    });
+  
+    return links;
 }
 
-function resolveHubcdnDirect(url, releaseName) {
+function resolveHubcdnDirect(url, releaseName, size) {
   return __async(this, null, function* () {
     const html = yield fetchText(url, { headers: __spreadValues({ Referer: url }, HEADERS) });
     const encoded = (html.match(/r=([A-Za-z0-9+/=]+)/)?.[1]) || (html.match(/reurl\s*=\s*"([^"]+)"/)?.[1]?.split("?r=").pop());
     if (!encoded) return [];
     const decoded = decodeBase64(encoded).split("link=").pop();
     if (!decoded || decoded === encoded) return [];
-    return [buildStream(releaseName, decoded, "HubCDN", { Referer: url })];
+    return [buildStream(releaseName, decoded, "HubCDN", { Referer: url }, size)];
   });
 }
 
-function resolveHubdrive(url, releaseName) {
+function resolveHubdrive(url, releaseName, size) {
   return __async(this, null, function* () {
     const html = yield fetchText(url);
     const $ = import_cheerio_without_node_native2.default.load(html);
     const href = $("a.btn.btn-primary.btn-user.btn-success1.m-1").attr("href");
     if (!href) return [];
-    return yield resolveLink(fixUrl(href, url), releaseName, url);
+    return yield resolveLink(fixUrl(href, url), releaseName, url, size);
   });
 }
 
-function resolveHubcloud(url, releaseName, referer) {
+function resolveHubcloud(url, releaseName, referer, size) {
   return __async(this, null, function* () {
     const baseHeaders = referer ? { Referer: referer } : {};
     let entryUrl = url;
@@ -510,7 +466,7 @@ function resolveHubcloud(url, releaseName, referer) {
     const html = yield fetchText(entryUrl, { headers: __spreadValues({ Referer: url }, baseHeaders) });
     const $ = import_cheerio_without_node_native2.default.load(html);
     
-    const size = $("i#size").first().text().trim();
+    const extractedSize = $("i#size").first().text().trim() || size;
     const fileHeader = $("div.card-header").first().text().trim() || releaseName;
     
     const streams = [];
@@ -529,13 +485,13 @@ function resolveHubcloud(url, releaseName, referer) {
                        : link;
 
       const streamHeaders = hosterName === "Pixeldrain" ? {} : { Referer: entryUrl };
-      streams.push(buildStream(fileHeader, finalUrl, hosterName, streamHeaders, size));
+      streams.push(buildStream(fileHeader, finalUrl, hosterName, streamHeaders, extractedSize));
     });
     return streams;
   });
 }
 
-function resolveLink(rawUrl, releaseName, referer = "") {
+function resolveLink(rawUrl, releaseName, referer = "", size = "") {
   return __async(this, null, function* () {
     let url = rawUrl;
     if (!url) return [];
@@ -546,15 +502,15 @@ function resolveLink(rawUrl, releaseName, referer = "") {
     const lower = url.toLowerCase();
     try {
       if (/\.(m3u8|mp4|mkv)(\?|$)/i.test(url)) {
-        return [buildStream(releaseName, url, "Direct", referer ? { Referer: referer } : {})];
+        return [buildStream(releaseName, url, "Direct", referer ? { Referer: referer } : {}, size)];
       }
-      if (lower.includes("hubdrive")) return yield resolveHubdrive(url, releaseName);
-      if (lower.includes("hubcloud")) return yield resolveHubcloud(url, releaseName, referer);
-      if (lower.includes("hubcdn")) return yield resolveHubcdnDirect(url, releaseName);
+      if (lower.includes("hubdrive")) return yield resolveHubdrive(url, releaseName, size);
+      if (lower.includes("hubcloud")) return yield resolveHubcloud(url, releaseName, referer, size);
+      if (lower.includes("hubcdn")) return yield resolveHubcdnDirect(url, releaseName, size);
       if (lower.includes("pixeldrain")) {
         const pdId = url.split('/').pop();
         const pdUrl = `https://pixeldrain.com/api/file/${pdId}?download`;
-        return [buildStream(releaseName, pdUrl, "Pixeldrain", {})];
+        return [buildStream(releaseName, pdUrl, "Pixeldrain", {}, size)];
       }
     } catch (error) {}
     return [];
@@ -584,9 +540,11 @@ function extractStreams(tmdbId, mediaType, season, episode) {
     const allStreams = [];
     const resolvedUrls = new Set();
 
-    for (const linkItem of links) {
-      const resolved = yield resolveLink(linkItem.url, linkItem.releaseName, contentUrl);
-      
+    // Use Promise.all to fetch links in parallel for faster loading
+    const promises = links.map(linkItem => resolveLink(linkItem.url, linkItem.releaseName, contentUrl, linkItem.size));
+    const resolvedArrays = yield Promise.all(promises);
+
+    for (const resolved of resolvedArrays) {
       for (const stream of resolved) {
         const pureUrl = stream.url.split('#')[0].toLowerCase();
         if (!resolvedUrls.has(pureUrl)) {
