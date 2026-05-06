@@ -103,6 +103,17 @@ function extractThirdListItem(html) {
   }
   return "";
 }
+function extractSizeFromHtml(html) {
+  var re = /<li[^>]*>([\s\S]*?)<\/li>/gi;
+  var m;
+  while ((m = re.exec(html)) !== null) {
+    var text = stripTags(m[1]);
+    if (text.indexOf("Size :") !== -1 || text.indexOf("Size:") !== -1) {
+      return text.replace(/Size\s*:\s*/i, "").trim();
+    }
+  }
+  return "";
+}
 function getIndexQuality(str) {
   if (!str) return "Unknown";
   // Check explicit resolution first (e.g. 2160p, 1080p, 720p)
@@ -201,7 +212,8 @@ function getTmdbDetails(tmdbId, mediaType) {
   });
 }
 function searchByTitle(title, year) {
-  var query = encodeURIComponent((title + " " + (year || "")).trim());
+  var cleanTitle = title.replace(/:/g, "").replace(/\s+/g, " ").trim();
+  var query = encodeURIComponent((cleanTitle + " " + (year || "")).trim());
   var url = DOMAIN + "/?s=" + query;
   console.log("[UHDMovies] Search: " + url);
   return fetchText(url).then(function(html) {
@@ -319,6 +331,22 @@ function extractVideoSeed(finallink) {
 }
 function extractInstantLink(finallink) {
   console.log("[UHDMovies] InstantLink: " + finallink);
+  if (finallink.indexOf("video-gen.xyz") !== -1) {
+    return fetch(finallink, {
+      method: "GET",
+      headers: { "User-Agent": USER_AGENT },
+      redirect: "manual"
+    }).then(function(res) {
+      var location = res.headers.get("location");
+      if (!location) return null;
+      var urlParam = location.split("?url=");
+      if (urlParam.length >= 2) return decodeURIComponent(urlParam[1]);
+      return location;
+    }).catch(function(err) {
+      console.error("[UHDMovies] InstantLink cdn error: " + err.message);
+      return null;
+    });
+  }
   var hostM = finallink.match(/^https?:\/\/([^\/]+)/);
   var host = hostM ? hostM[1] : finallink.indexOf("video-leech") !== -1 ? "video-leech.pro" : "video-seed.pro";
   var tokenParts = finallink.split("url=");
@@ -390,9 +418,31 @@ function extractCFType1(url) {
 }
 function extractResumeCloudLink(baseUrl, path) {
   console.log("[UHDMovies] ResumeCloud: " + baseUrl + path);
-  return fetchText(baseUrl + path).then(function(html) {
+  var fullUrl = baseUrl + path;
+  return fetchText(fullUrl).then(function(html) {
     var links = extractBtnSuccessLinks(html);
-    return links.length ? links[0] : null;
+    if (links.length) return links[0];
+    var keyM = html.match(/formData\.append\(["']key["'],\s*["']([a-f0-9]+)["']\)/);
+    if (!keyM) return null;
+    var key = keyM[1];
+    var formData = "action=cloud&key=" + encodeURIComponent(key) + "&action_token=";
+    return fetch(fullUrl, {
+      method: "POST",
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "x-token": baseUrl.replace(/^https?:\/\//, ""),
+        "Referer": fullUrl
+      },
+      body: formData
+    }).then(function(res) {
+      return res.json();
+    }).then(function(data) {
+      if (data && (data.url || data.visit_url)) {
+        return data.url || data.visit_url;
+      }
+      return null;
+    }).catch(function() { return null; });
   }).catch(function(err) {
     console.error("[UHDMovies] ResumeCloud error: " + err.message);
     return null;
@@ -415,12 +465,10 @@ function extractDriveseedPage(url) {
     var baseDomain = getBaseUrl(url);
     var qualityText = extractFirstListGroupItem(html);
     var rawFileName = qualityText.replace("Name : ", "").trim();
-    var fileName = cleanTitle(rawFileName);
-    var size = extractThirdListItem(html).replace("Size : ", "").trim();
+    var size = extractSizeFromHtml(html);
     var quality = buildQualityLabel(qualityText);
-    var labelExtras = "";
-    if (fileName) labelExtras += "[" + fileName + "]";
-    if (size) labelExtras += "[" + size + "]";
+    var fileLabel = rawFileName.replace(/\.[a-z0-9]+$/i, "").trim();
+    var sizeLabel = size ? " [" + size + "]" : "";
     var textCenterLinks = extractTextCenterLinks(html);
     var promises = [];
     textCenterLinks.forEach(function(item) {
@@ -430,31 +478,31 @@ function extractDriveseedPage(url) {
       if (text.indexOf("instant download") !== -1) {
         promises.push(
           extractInstantLink(href).then(function(link) {
-            if (link) streams.push({ name: "UHDMovies", title: "Driveseed Instant " + labelExtras, url: link, quality });
+            if (link) streams.push({ name: "UHDMovies", title: quality + sizeLabel + "\n" + fileLabel, url: link, quality, seekable: false });
           })
         );
       } else if (text.indexOf("resume worker bot") !== -1) {
         promises.push(
           extractResumeBot(href).then(function(link) {
-            if (link) streams.push({ name: "UHDMovies", title: "Driveseed ResumeBot " + labelExtras, url: link, quality });
+            if (link) streams.push({ name: "UHDMovies", title: "⚡ Seekable | " + quality + sizeLabel + "\n" + fileLabel, url: link, quality, seekable: true });
           })
         );
       } else if (text.indexOf("direct links") !== -1) {
         promises.push(
           extractCFType1(baseDomain + href).then(function(links) {
             links.forEach(function(link) {
-              streams.push({ name: "UHDMovies", title: "Driveseed Direct " + labelExtras, url: link, quality });
+              streams.push({ name: "UHDMovies", title: quality + sizeLabel + "\n" + fileLabel, url: link, quality, seekable: false });
             });
           })
         );
       } else if (text.indexOf("resume cloud") !== -1) {
         promises.push(
           extractResumeCloudLink(baseDomain, href).then(function(link) {
-            if (link) streams.push({ name: "UHDMovies", title: "Driveseed ResumeCloud " + labelExtras, url: link, quality });
+            if (link) streams.push({ name: "UHDMovies", title: "⚡ Seekable | " + quality + sizeLabel + "\n" + fileLabel, url: link, quality, seekable: true });
           })
         );
       } else if (text.indexOf("cloud download") !== -1) {
-        streams.push({ name: "UHDMovies", title: "Driveseed Cloud " + labelExtras, url: href, quality });
+        streams.push({ name: "UHDMovies", title: quality + sizeLabel + "\n" + fileLabel, url: href, quality, seekable: false });
       }
     });
     return Promise.all(promises).then(function() {
@@ -586,6 +634,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     }
     return processResult(0).then(function(streams) {
       function scoreStream(s) {
+        var seekBonus = s.seekable ? 1 : 0;
         var q = s.quality || "";
         var rScore = 0;
         if (/^4K/i.test(q))    rScore = 4;
@@ -598,7 +647,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
         else if (/web.?dl/i.test(q))  sScore = 3;
         else if (/webrip/i.test(q))   sScore = 2;
         else if (/hdrip|dvdrip|hdtv/i.test(q)) sScore = 1;
-        return rScore * 10 + sScore;
+        return rScore * 100 + sScore * 10 + seekBonus;
       }
       streams.sort(function(a, b) { return scoreStream(b) - scoreStream(a); });
       return streams;
